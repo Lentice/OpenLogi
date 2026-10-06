@@ -110,6 +110,12 @@ independent readback confirms it. Reads on reconnect wait for restoration.
 The button beneath the thumb rest uses the normal `GestureButton` binding,
 including single actions, long presses, and gestures.
 
+For an interactive hardware check, quit OpenLogi and Logitech Options+ and run
+`cargo run -p openlogi-hid --example m720_probe -- 60` to observe thumb-button
+press/release events. Add `speed` after the duration to compare 1.5× and 0.5×
+for that many seconds each. Let the test finish: it restores button reporting
+or the original speed and verifies the restoration.
+
 `[keyboard.bindings]` contains global key triggers such as `f1` or
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
 `option`, and `command`; aliases such as `ctrl`, `alt`, and `cmd` are accepted.
