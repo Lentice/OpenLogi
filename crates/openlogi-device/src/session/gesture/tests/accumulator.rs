@@ -32,6 +32,87 @@ fn release() -> RawControlEvent {
     RawControlEvent::DivertedButtons([0, 0, 0, 0])
 }
 
+#[test]
+fn m720_multiplatform_gesture_button_delivers_a_click() {
+    let cid = reprog_controls::control_ids::MULTIPLATFORM_GESTURE_BUTTON.0;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        &[cid],
+        &[],
+        &[],
+        &tx,
+    );
+    handle_reprog(&mut acc, release(), &[cid], &[], &[], &tx);
+    assert_eq!(
+        std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>(),
+        vec![
+            CapturedInput::ButtonDown(ButtonId::GestureButton),
+            CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Click),
+            CapturedInput::ButtonUp(ButtonId::GestureButton),
+        ]
+    );
+}
+
+#[test]
+fn m720_held_thumb_button_commits_a_swipe_without_a_click() {
+    let cid = reprog_controls::control_ids::MULTIPLATFORM_GESTURE_BUTTON.0;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        &[cid],
+        &[],
+        &[],
+        &tx,
+    );
+    acc.backdate_hold_for_test();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        &[cid],
+        &[],
+        &[],
+        &tx,
+    );
+    handle_reprog(&mut acc, release(), &[cid], &[], &[], &tx);
+    assert_eq!(
+        std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>(),
+        vec![
+            CapturedInput::ButtonDown(ButtonId::GestureButton),
+            CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Right),
+            CapturedInput::ButtonUp(ButtonId::GestureButton),
+        ]
+    );
+}
+
+#[test]
+fn m720_plain_thumb_binding_emits_one_press_and_release_without_gesturing() {
+    let cid = reprog_controls::control_ids::MULTIPLATFORM_GESTURE_BUTTON.0;
+    let buttons = [(cid, ButtonId::GestureButton)];
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    for event in [
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        release(),
+        release(),
+    ] {
+        handle_reprog(&mut acc, event, &[], &[], &buttons, &tx);
+    }
+    assert_eq!(
+        std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>(),
+        vec![
+            CapturedInput::ButtonDown(ButtonId::GestureButton),
+            CapturedInput::ButtonUp(ButtonId::GestureButton),
+        ]
+    );
+}
+
 /// Read the next completed gesture while leaving lifecycle assertions to the
 /// dedicated edge tests below.
 fn next_gesture(

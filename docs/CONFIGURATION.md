@@ -99,6 +99,9 @@ Common device fields are:
 - `host_switch_targets` and `fn_lock` for compatible keyboards
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
+The M720 button beneath the thumb rest uses the normal `GestureButton` binding,
+including single actions, long presses, and gestures.
+
 `[keyboard.bindings]` contains global key triggers such as `f1` or
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
 `option`, and `command`; aliases such as `ctrl`, `alt`, and `cmd` are accepted.

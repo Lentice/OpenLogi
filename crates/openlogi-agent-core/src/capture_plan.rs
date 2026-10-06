@@ -575,6 +575,22 @@ mod tests {
                 .contains(&(GESTURE_BUTTON_CID, ButtonId::GestureButton)),
             "a single-bound gesture button must be plain-diverted, or the binding can never fire"
         );
+        assert!(
+            plan.target.spec.divert_buttons.contains(&(
+                openlogi_hid::reprog_controls::control_ids::MULTIPLATFORM_GESTURE_BUTTON.0,
+                ButtonId::GestureButton,
+            )),
+            "M720's physical thumb button must reach the same binding"
+        );
+        assert!(
+            !plan
+                .target
+                .spec
+                .divert_buttons
+                .iter()
+                .any(|(cid, _)| *cid == 0x00d7),
+            "the virtual gesture control must stay native"
+        );
     }
 
     #[test]
