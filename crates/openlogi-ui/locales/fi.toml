@@ -187,6 +187,11 @@ select_device_button_description = "Valitse laitteesta painike, jonka toimintoa 
 remove_profile_description = "Tämä poistaa profiilin mukautetut painikesidonnat. Oletussidontoihin ei tehdä muutoksia."
 
 [pointer]
+speed_retry = "Read or write failed. Click to retry."
+speed_offline = "Movement speed is unavailable while the mouse is offline."
+speed = "Movement speed"
+speed_description = "Adjust the mouse movement multiplier. 1× is the original speed; sensor DPI stays unchanged."
+reading_speed = "Reading movement speed…"
 mouse_button_profiles = "Hiiren painikeprofiilit"
 mouse_profile_pointer = "Hiiren osoitin"
 mouse_profile_focused = "Kohdistettu sovellus"

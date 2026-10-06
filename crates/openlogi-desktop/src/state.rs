@@ -29,7 +29,7 @@ pub use devices::DeviceRecord;
 pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiLoad, FnLockLoad, SmartShiftLoad};
+pub use load::{DpiLoad, FnLockLoad, PointerSpeedLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +76,7 @@ mod light;
 mod lighting;
 mod load;
 mod pointer;
+mod pointer_speed;
 mod scroll;
 mod settings;
 mod smartshift;
@@ -214,10 +215,14 @@ impl AppState {
     /// after inventory or selection changes; render paths only consume caches.
     pub(crate) fn load_current_device_reads(cx: &mut App) {
         Self::update(cx, |state, cx| {
+            if !state.current_record().is_some_and(|record| record.online) {
+                return;
+            }
             state.load_current_dpi(cx);
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
             state.load_current_fn_lock(cx);
+            state.load_current_pointer_speed(cx);
         });
     }
 

@@ -24,6 +24,7 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod pointer_speed;
 mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
@@ -52,6 +53,9 @@ pub use litra::{
     LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
     litra_model_for_route, matches_litra,
+};
+pub use pointer_speed::{
+    PointerSpeed, get_pointer_speed, get_pointer_speed_on, set_pointer_speed, set_pointer_speed_on,
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,

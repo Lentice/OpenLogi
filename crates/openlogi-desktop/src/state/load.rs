@@ -37,3 +37,6 @@ pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
 /// read shows what the keyboard holds right now — it can differ from the
 /// persisted `fn_lock` after the user pressed Fn+Esc on the keyboard.
 pub type FnLockLoad = Load<Arc<FnLockState>>;
+
+/// Device movement multiplier (`0x2205`), independent of sensor DPI.
+pub type PointerSpeedLoad = Load<Arc<openlogi_core::hid::PointerSpeed>>;

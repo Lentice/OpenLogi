@@ -187,6 +187,11 @@ select_device_button_description = "Ne yapacağını değiştirmek için cihaz �
 remove_profile_description = "Bu, profildeki özel düğme atamalarını siler. Varsayılan atamalar etkilenmez."
 
 [pointer]
+speed_retry = "Read or write failed. Click to retry."
+speed_offline = "Movement speed is unavailable while the mouse is offline."
+speed = "Movement speed"
+speed_description = "Adjust the mouse movement multiplier. 1× is the original speed; sensor DPI stays unchanged."
+reading_speed = "Reading movement speed…"
 mouse_button_profiles = "Fare düğmesi profilleri"
 mouse_profile_pointer = "Fare işaretçisi"
 mouse_profile_focused = "Odaklanmış uygulama"

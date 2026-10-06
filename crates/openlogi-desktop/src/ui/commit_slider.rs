@@ -13,7 +13,7 @@ use std::rc::Rc;
 use gpui::{App, AppContext as _, Context, Entity, Subscription, Window};
 use gpui_component::slider::{SliderEvent, SliderState};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
-use openlogi_core::hid::{Dpi, SmartShiftThreshold};
+use openlogi_core::hid::{Dpi, PointerSpeed, SmartShiftThreshold};
 
 /// A value a slider thumb can rest on.
 pub(crate) trait SliderUnit: Copy + PartialEq + 'static {
@@ -88,6 +88,7 @@ macro_rules! rounded_slider_unit {
 }
 
 rounded_slider_unit!(
+    PointerSpeed,
     Dpi,
     SmartShiftThreshold,
     ThumbwheelSensitivity,

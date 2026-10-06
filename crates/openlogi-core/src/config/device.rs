@@ -13,7 +13,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::Dpi;
+use crate::hid::{Dpi, PointerSpeed};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -273,6 +273,9 @@ pub struct DeviceConfig {
     /// means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Device-side pointer multiplier, re-applied after reconnect. Separate from DPI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer_speed: Option<PointerSpeed>,
 }
 
 impl DeviceConfig {
@@ -373,6 +376,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            pointer_speed: None,
         }
     }
 }
@@ -493,6 +497,8 @@ struct RawDeviceConfig {
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
+    #[serde(default)]
+    pointer_speed: Option<PointerSpeed>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -553,6 +559,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            pointer_speed: raw.pointer_speed,
         }
     }
 }

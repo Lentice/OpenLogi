@@ -13,6 +13,8 @@ fn device_identity_roundtrips_and_is_iterable() {
         codename: None,
         kind: DeviceKind::Mouse,
         capabilities: Capabilities {
+            pointer_speed: false,
+            smartshift: false,
             buttons: true,
             pointer: true,
             lighting: false,

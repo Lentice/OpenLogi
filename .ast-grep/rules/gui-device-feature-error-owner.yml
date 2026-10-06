@@ -1,0 +1,17 @@
+id: gui-device-feature-error-owner
+language: rust
+severity: error
+message: Device read retry and load classification share feature_error_is_permanent in services/device_reads.rs.
+note: Fn-lock and SmartShift repeated the same unsupported-feature decision; pointer speed now consumes the same owner.
+files:
+  - crates/openlogi-desktop/src/services/device_reads.rs
+rule:
+  all:
+    - pattern: matches!($ERROR, WriteError::FeatureUnsupported { .. })
+    - not:
+        inside:
+          kind: function_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^feature_error_is_permanent$'

@@ -717,6 +717,27 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
               the real server impl, which is the point of the mock"
 )]
 impl Agent for MockAgent {
+    async fn read_pointer_speed(
+        self,
+        _: Context,
+        _route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::PointerSpeed, WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x2205,
+        })
+    }
+
+    async fn set_pointer_speed(
+        self,
+        _: Context,
+        _route: DeviceRoute,
+        _speed: openlogi_core::hid::PointerSpeed,
+    ) -> Result<(), WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x2205,
+        })
+    }
+
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
     }

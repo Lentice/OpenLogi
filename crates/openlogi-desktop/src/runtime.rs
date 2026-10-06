@@ -289,6 +289,18 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_config_reload_result(result));
                 });
             }
+            ipc::GuiUpdate::PointerSpeedWritten {
+                key,
+                flight,
+                speed,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_pointer_speed_written(&key, flight, speed, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::FnLockWritten { key, result } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| state.apply_fn_lock_written(&key, result));

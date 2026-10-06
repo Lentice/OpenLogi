@@ -125,6 +125,7 @@ pub struct SharedHandles {
     pub host_switch_links: HostSwitchLinks,
     /// Orders every path's Fn-lock writes per keyboard.
     fn_lock_order: FnLockOrder,
+    restoration: crate::hardware::DeviceRestoration,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -159,6 +160,7 @@ impl SharedHandles {
             registry: self.channel_registry.clone(),
             receiver_access: self.receiver_access.clone(),
             device_io: self.device_io.clone(),
+            restoration: self.restoration.clone(),
         }
     }
 
@@ -330,6 +332,7 @@ impl Orchestrator {
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
             fn_lock_order: FnLockOrder::default(),
+            restoration: crate::hardware::DeviceRestoration::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
@@ -650,7 +653,6 @@ impl Orchestrator {
             inventories: inventories.to_vec(),
             standalone: standalone.to_vec(),
         };
-        self.publish_inventory();
         let devices = build_devices(&self.config, inventories, standalone);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
         // wheel mode) live in device RAM and reset on a power cycle. Every
@@ -668,6 +670,7 @@ impl Orchestrator {
         for idx in targets {
             self.reapply_volatile_settings(&devices[idx]);
         }
+        self.publish_inventory();
         let changed = next_current != self.current
             || devices.len() != self.devices.len()
             || devices.iter().zip(&self.devices).any(|(a, b)| {
@@ -738,6 +741,9 @@ impl Orchestrator {
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
                 .map(openlogi_hid::SmartShiftStatus::from),
+            pointer_speed: device
+                .and_then(|d| d.pointer_speed)
+                .filter(|_| dev.capabilities.is_some_and(|c| c.pointer_speed)),
         };
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(

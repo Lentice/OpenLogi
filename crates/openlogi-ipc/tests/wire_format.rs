@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 34);
+    assert_eq!(PROTOCOL_VERSION, 36);
 }
 
 #[test]
@@ -211,6 +211,23 @@ fn request_variant_order() {
 
 #[test]
 fn semantic_read_requests() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb015,
+    };
+    assert_wire(
+        &AgentRequest::ReadPointerSpeed {
+            route: route.clone(),
+        },
+        "1f02fb6d04fb15b0",
+    );
+    assert_wire(
+        &AgentRequest::SetPointerSpeed {
+            route,
+            speed: openlogi_core::hid::PointerSpeed::NORMAL,
+        },
+        "2002fb6d04fb15b0fb0001",
+    );
     assert_wire(
         &AgentRequest::ReadWheel {
             route: DeviceRoute::Bolt {
@@ -468,6 +485,8 @@ fn device_inventory() {
                 extended_model_id: 0x0b,
             }),
             capabilities: Some(Capabilities {
+                pointer_speed: false,
+                smartshift: false,
                 buttons: true,
                 pointer: true,
                 lighting: false,
@@ -483,7 +502,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000000",
     );
 }
 

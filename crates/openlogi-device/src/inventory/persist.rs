@@ -35,7 +35,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 /// v3 adds event-capable feature indexes discovered by the immutable walk.
-const SCHEMA_VERSION: u32 = 3;
+/// v4 adds movement-scaling capability; older probes must be measured again.
+/// v5 adds independently measured SmartShift capability.
+const SCHEMA_VERSION: u32 = 5;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.

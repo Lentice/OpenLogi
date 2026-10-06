@@ -521,7 +521,52 @@ macro_rules! commands {
     };
 }
 
+/// Read the device's own movement multiplier.
+pub struct ReadPointerSpeed {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<openlogi_core::hid::PointerSpeed, WriteError>>,
+}
+
+impl Request for ReadPointerSpeed {
+    type Answer = Result<openlogi_core::hid::PointerSpeed, WriteError>;
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_pointer_speed(context::current(), self.route.clone())
+            .await
+    }
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Apply and read back one multiplier; an old flight cannot replace a new edit.
+pub struct SetPointerSpeed {
+    pub route: DeviceRoute,
+    pub speed: openlogi_core::hid::PointerSpeed,
+    pub key: DeviceKey,
+    pub flight: u64,
+}
+
+impl Request for SetPointerSpeed {
+    type Answer = Result<(), WriteError>;
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_pointer_speed(context::current(), self.route.clone(), self.speed)
+            .await
+    }
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::PointerSpeedWritten {
+            key: self.key,
+            flight: self.flight,
+            speed: self.speed,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
 commands! {
+    ReadPointerSpeed,
+    SetPointerSpeed,
     SetDpi,
     SetLighting,
     SetLight,

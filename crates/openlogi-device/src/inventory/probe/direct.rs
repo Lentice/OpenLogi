@@ -73,7 +73,12 @@ pub(super) async fn probe_direct(
     let capabilities = probe.capabilities;
     let walk_succeeded = capabilities.is_some();
     let caps = capabilities.unwrap_or_default();
-    let is_peripheral = probe.battery.is_some() || caps.buttons || caps.pointer || caps.lighting;
+    let is_peripheral = probe.battery.is_some()
+        || caps.buttons
+        || caps.pointer
+        || caps.pointer_speed
+        || caps.smartshift
+        || caps.lighting;
     // A walk that never completed says nothing about what this node is: the
     // discriminator below would read "no battery, no config feature" off an
     // empty probe and reject a real mouse as a receiver's secondary interface.

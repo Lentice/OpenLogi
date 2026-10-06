@@ -133,6 +133,127 @@ fn direct_topology(node_id: NodeId) -> ReplayTopology {
     }
 }
 
+#[tokio::test]
+async fn replay_first_speed_read_follows_the_published_reconnect_restoration() {
+    use crate::receiver_access::ExclusiveAccessReason;
+    use openlogi_core::hid::PointerSpeed;
+
+    let node = NodeId::from("agent-scaling-node".to_string());
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: PRODUCT_ID,
+    };
+    let backend = Arc::new(
+        ReplayBackend::new(
+            direct_topology(node.clone()),
+            vec![scaling_restore_cassette()],
+        )
+        .expect("valid scaling replay"),
+    );
+    let speed = PointerSpeed::try_new(384).expect("1.5×");
+    let mut config = Config::ephemeral();
+    config.set_pointer_speed("unit:4f4c4404", speed);
+    let hardware = HardwareContext::injected(backend.clone(), device_io_channel().1);
+    let observable = Arc::new(ObservableState::new("test".into()));
+    let mut orchestrator = Orchestrator::with_hardware(config, observable.clone(), hardware);
+    let shared = orchestrator.shared();
+    let inventories = shared
+        .hardware()
+        .enumerator()
+        .with_registry(shared.channel_registry.clone())
+        .enumerate()
+        .await
+        .expect("scaling device inventory");
+    assert!(
+        !inventories.is_empty(),
+        "inventory failed: {:?}",
+        backend.channel_completion(CHANNEL)
+    );
+    assert!(
+        inventories[0].paired[0]
+            .capabilities
+            .expect("measured capabilities")
+            .pointer_speed
+    );
+
+    // Hold restoration before its worker can touch HID. Publishing inventory
+    // must already register that work, so the first RPC read waits for it.
+    let exclusive = shared
+        .receiver_access
+        .acquire_exclusive(ExclusiveAccessReason::Pairing)
+        .await;
+    orchestrator.refresh_inventory(&inventories, &[], false);
+    assert!(observable.snapshot().inventory[0].paired[0].online);
+    let read = shared
+        .device(&route)
+        .run(HidppOperation::ReadPointerSpeed, |channel| async move {
+            openlogi_hid::get_pointer_speed_on(&channel).await
+        });
+    tokio::pin!(read);
+    assert!(futures_lite::future::poll_once(&mut read).await.is_none());
+    drop(exclusive);
+    let actual = tokio::time::timeout(Duration::from_secs(2), read)
+        .await
+        .expect("restoration and read are bounded")
+        .expect("verified restored speed");
+    assert_eq!(actual, speed);
+    assert_eq!(backend.open_count(&node).expect("known node"), 1);
+    backend
+        .require_complete()
+        .expect("restore, verification and client read consumed in order");
+}
+
+fn scaling_restore_cassette() -> HidCassette {
+    let mut cassette = direct_inventory_and_dpi_cassette();
+    cassette.name = "agent pointer scaling restoration then read".into();
+    cassette.exchanges.truncate(5);
+    cassette.exchanges[2] = h20(short(0xff, 1, 0, [0; 3]), short(0xff, 1, 0, [3, 0, 0]));
+    cassette.exchanges[4] = h20(
+        short(0xff, 1, 0x10, [2, 0, 0]),
+        short(0xff, 1, 0x10, [0x22, 0x05, 0]),
+    );
+    cassette.exchanges.extend([
+        h20(
+            short(0xff, 1, 0x10, [3, 0, 0]),
+            short(0xff, 1, 0x10, [0, 3, 0]),
+        ),
+        h20(
+            short(0xff, 3, 0, [0; 3]),
+            long(
+                0xff,
+                3,
+                0,
+                [
+                    1, 0x4f, 0x4c, 0x44, 4, 0, 1, 0xb3, 0x5b, 0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+        ),
+    ]);
+    for write in [true, false] {
+        cassette.exchanges.extend([
+            h20(
+                short(0xff, 0, 0x10, [0; 3]),
+                short(0xff, 0, 0x10, [4, 0, 0]),
+            ),
+            h20(
+                short(0xff, 0, 0, [0x22, 0x05, 0]),
+                short(0xff, 0, 0, [2, 0, 0]),
+            ),
+        ]);
+        if write {
+            cassette.exchanges.push(h20(
+                short(0xff, 2, 0x10, [1, 0x80, 0]),
+                short(0xff, 2, 0x10, [0; 3]),
+            ));
+        }
+        cassette.exchanges.push(h20(
+            short(0xff, 2, 0, [0; 3]),
+            short(0xff, 2, 0, [1, 0x80, 0]),
+        ));
+    }
+    cassette
+}
+
 fn direct_inventory_and_dpi_cassette() -> HidCassette {
     let exchanges = vec![
         h20(

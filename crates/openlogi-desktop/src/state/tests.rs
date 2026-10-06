@@ -51,6 +51,7 @@ mod device_list;
 mod device_names;
 mod fn_lock;
 mod lighting;
+mod pointer_speed;
 mod profile_scope;
 mod reload;
 mod smartshift;

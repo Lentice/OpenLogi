@@ -15,9 +15,22 @@ use super::{
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
 };
-use crate::hid::Dpi;
+use crate::hid::{Dpi, PointerSpeed};
 
 impl Config {
+    /// Stored device-side pointer multiplier, or `None` when unmanaged.
+    #[must_use]
+    pub fn pointer_speed(&self, device_key: &str) -> Option<PointerSpeed> {
+        self.devices.get(device_key).and_then(|d| d.pointer_speed)
+    }
+
+    /// Persist a pointer multiplier for reload and reconnect.
+    pub fn set_pointer_speed(&mut self, device_key: &str, speed: PointerSpeed) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .pointer_speed = Some(speed);
+    }
     /// The bindings stored for `device_key` as they were committed, or an
     /// empty map when the device has none yet. The effective per-button map,
     /// with defaults and the per-app overlay applied, is

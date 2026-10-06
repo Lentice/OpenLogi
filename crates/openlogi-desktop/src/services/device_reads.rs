@@ -5,20 +5,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
-use openlogi_core::hid::{DeviceRoute, DpiInfo, FnLockState, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{
+    DeviceRoute, DpiInfo, FnLockState, PointerSpeed, SmartShiftStatus, WriteError,
+};
 use swr_core::{
     MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
 };
 use swr_gpui::Query;
 use tokio::sync::mpsc;
 
-use super::ipc::{Command, ReadDpi, ReadFnLock, ReadSmartShift};
-use crate::state::{AppState, DeviceKey, DpiLoad, FnLockLoad, Load, SmartShiftLoad, StateEvent};
+use super::ipc::{Command, ReadDpi, ReadFnLock, ReadPointerSpeed, ReadSmartShift};
+use crate::state::{
+    AppState, DeviceKey, DpiLoad, FnLockLoad, Load, PointerSpeedLoad, SmartShiftLoad, StateEvent,
+};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
 const FN_LOCK: &str = "fn-lock";
+const POINTER_SPEED: &str = "pointer-speed";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -29,9 +34,13 @@ const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
 };
 
 type Cached<T> = Option<Arc<T>>;
+type ReadKey = (&'static str, &'static str, String);
 
 struct DeviceRead<T: 'static> {
     route: DeviceRoute,
+    /// Each subscription owns a cache entry; an asynchronously retired adapter
+    /// cannot refetch into a replacement route's entry.
+    cache_key: ReadKey,
     /// The query flight this read belongs to: a callback from an older flight
     /// is stale and must not touch the entry that replaced it.
     flight: u64,
@@ -53,6 +62,7 @@ pub(crate) struct DeviceReads {
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
     fn_lock: BTreeMap<DeviceKey, DeviceRead<FnLockState>>,
+    pointer_speed: BTreeMap<DeviceKey, DeviceRead<PointerSpeed>>,
 }
 
 impl DeviceReads {
@@ -89,7 +99,8 @@ impl DeviceReads {
             READ_RETRY_POLICY,
         )
         .retry_if(|error| !dpi_error_is_permanent(error));
-        let handle = client.subscribe(query_key(DPI, &key), fetcher, QueryOptions::immutable());
+        let cache_key = query_key(DPI, &key, flight);
+        let handle = client.subscribe(cache_key.clone(), fetcher, QueryOptions::immutable());
         let query = Query::new(&client, handle, cx);
         let load = project_load(query.read(cx), dpi_error_is_permanent);
         let observed_key = key.clone();
@@ -106,6 +117,7 @@ impl DeviceReads {
         self.dpi.insert(
             key,
             DeviceRead {
+                cache_key,
                 route,
                 flight,
                 load,
@@ -158,16 +170,21 @@ impl DeviceReads {
             return false;
         };
         let previous = self.smartshift.remove(&key);
-        let had_previous = previous.is_some();
-        drop(previous);
-        if preserve_data {
-            // A confirming read keeps the optimistic write visible as stale
-            // data while invalidation starts the replacement query.
-            client.invalidate(query_key(SMARTSHIFT, &key));
-        } else if had_previous {
-            self.clear::<SmartShiftStatus>(SMARTSHIFT, &key);
+        let preserved = previous.as_ref().and_then(|read| match &read.load {
+            Load::Ready(value) if preserve_data => Some(value.clone()),
+            _ => None,
+        });
+        if let Some(previous) = previous {
+            self.clear(previous);
         }
         let flight = self.take_flight();
+        let cache_key = query_key(SMARTSHIFT, &key, flight);
+        if let Some(value) = preserved {
+            client.set::<_, Cached<SmartShiftStatus>, WriteError>(cache_key.clone(), Some(value));
+            // No subscriber exists for this new flight yet, so invalidation
+            // marks the seed stale without launching the retired fetcher.
+            client.invalidate(cache_key.clone());
+        }
         let fetch_route = route.clone();
         let fetcher = Retry::new(
             runtime,
@@ -181,19 +198,15 @@ impl DeviceReads {
             },
             READ_RETRY_POLICY,
         )
-        .retry_if(|error| !smartshift_error_is_permanent(error));
-        let handle = client.subscribe(
-            query_key(SMARTSHIFT, &key),
-            fetcher,
-            QueryOptions::immutable(),
-        );
+        .retry_if(|error| !feature_error_is_permanent(error));
+        let handle = client.subscribe(cache_key.clone(), fetcher, QueryOptions::immutable());
         let query = Query::new(&client, handle, cx);
-        let load = project_load(query.read(cx), smartshift_error_is_permanent);
+        let load = project_load(query.read(cx), feature_error_is_permanent);
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
             let query_state = query_state.read(cx);
             let settled = smartshift_read_is_settled(query_state);
-            let load = project_load(query_state, smartshift_error_is_permanent);
+            let load = project_load(query_state, feature_error_is_permanent);
             if state
                 .device_reads_mut()
                 .update_smartshift(&observed_key, flight, load)
@@ -207,6 +220,7 @@ impl DeviceReads {
         self.smartshift.insert(
             key,
             DeviceRead {
+                cache_key,
                 route,
                 flight,
                 load,
@@ -249,13 +263,14 @@ impl DeviceReads {
             },
             READ_RETRY_POLICY,
         )
-        .retry_if(|error| !fn_lock_error_is_permanent(error));
-        let handle = client.subscribe(query_key(FN_LOCK, &key), fetcher, QueryOptions::immutable());
+        .retry_if(|error| !feature_error_is_permanent(error));
+        let cache_key = query_key(FN_LOCK, &key, flight);
+        let handle = client.subscribe(cache_key.clone(), fetcher, QueryOptions::immutable());
         let query = Query::new(&client, handle, cx);
-        let load = project_load(query.read(cx), fn_lock_error_is_permanent);
+        let load = project_load(query.read(cx), feature_error_is_permanent);
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
-            let load = project_load(query_state.read(cx), fn_lock_error_is_permanent);
+            let load = project_load(query_state.read(cx), feature_error_is_permanent);
             if state
                 .device_reads_mut()
                 .update_fn_lock(&observed_key, flight, load)
@@ -266,6 +281,7 @@ impl DeviceReads {
         self.fn_lock.insert(
             key,
             DeviceRead {
+                cache_key,
                 route,
                 flight,
                 load,
@@ -281,9 +297,9 @@ impl DeviceReads {
     /// flight, so a pre-write reading cannot land on top of it.
     pub(crate) fn set_fn_lock_ready(&mut self, key: &DeviceKey, state: FnLockState) {
         let value = Arc::new(state);
-        if let Some(client) = &self.client {
+        if let (Some(client), Some(read)) = (&self.client, self.fn_lock.get(key)) {
             client.set::<_, Cached<FnLockState>, WriteError>(
-                query_key(FN_LOCK, key),
+                read.cache_key.clone(),
                 Some(value.clone()),
             );
         }
@@ -305,6 +321,87 @@ impl DeviceReads {
     #[must_use]
     pub(crate) fn fn_lock_load(&self, key: &DeviceKey) -> Option<&FnLockLoad> {
         self.fn_lock.get(key).map(|read| &read.load)
+    }
+
+    /// Read movement scaling unless this device route is already subscribed.
+    pub(crate) fn ensure_pointer_speed(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .pointer_speed
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_pointer_speed(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadPointerSpeed { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !feature_error_is_permanent(error));
+        let cache_key = query_key(POINTER_SPEED, &key, flight);
+        let handle = client.subscribe(cache_key.clone(), fetcher, QueryOptions::immutable());
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), feature_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), feature_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_pointer_speed(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::PointerSpeedChanged(observed_key.clone()));
+            }
+        });
+        self.pointer_speed.insert(
+            key,
+            DeviceRead {
+                cache_key,
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Publish a verified multiplier, fencing any pre-write cached read.
+    pub(crate) fn set_pointer_speed_ready(&mut self, key: &DeviceKey, state: PointerSpeed) {
+        let value = Arc::new(state);
+        if let (Some(client), Some(read)) = (&self.client, self.pointer_speed.get(key)) {
+            client.set::<_, Cached<PointerSpeed>, WriteError>(
+                read.cache_key.clone(),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.pointer_speed.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
+    /// The movement-scaling reading, or `None` before subscription.
+    #[must_use]
+    pub(crate) fn pointer_speed_load(&self, key: &DeviceKey) -> Option<&PointerSpeedLoad> {
+        self.pointer_speed.get(key).map(|read| &read.load)
     }
 
     /// `key`'s DPI load, or `None` while nothing has subscribed to it.
@@ -344,9 +441,9 @@ impl DeviceReads {
     /// Publish a SmartShift write optimistically into swr and the view model.
     pub(crate) fn set_smartshift_ready(&mut self, key: &DeviceKey, status: SmartShiftStatus) {
         let value = Arc::new(status);
-        if let Some(client) = &self.client {
+        if let (Some(client), Some(read)) = (&self.client, self.smartshift.get(key)) {
             client.set::<_, Cached<SmartShiftStatus>, WriteError>(
-                query_key(SMARTSHIFT, key),
+                read.cache_key.clone(),
                 Some(value.clone()),
             );
         }
@@ -360,26 +457,30 @@ impl DeviceReads {
         self.remove_dpi(key);
         self.remove_smartshift(key);
         self.remove_fn_lock(key);
+        self.remove_pointer_speed(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
         if let Some(read) = self.dpi.remove(key) {
-            drop(read);
-            self.clear::<DpiInfo>(DPI, key);
+            self.clear(read);
         }
     }
 
     pub(crate) fn remove_smartshift(&mut self, key: &DeviceKey) {
         if let Some(read) = self.smartshift.remove(key) {
-            drop(read);
-            self.clear::<SmartShiftStatus>(SMARTSHIFT, key);
+            self.clear(read);
         }
     }
 
     fn remove_fn_lock(&mut self, key: &DeviceKey) {
         if let Some(read) = self.fn_lock.remove(key) {
-            drop(read);
-            self.clear::<FnLockState>(FN_LOCK, key);
+            self.clear(read);
+        }
+    }
+
+    pub(crate) fn remove_pointer_speed(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.pointer_speed.remove(key) {
+            self.clear(read);
         }
     }
 
@@ -390,12 +491,47 @@ impl DeviceReads {
             .keys()
             .chain(self.smartshift.keys())
             .chain(self.fn_lock.keys())
+            .chain(self.pointer_speed.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
         for key in removed {
             self.remove(&key);
         }
+    }
+
+    /// Reserve a flight for a speed write, superseding both reads and older writes.
+    pub(crate) fn begin_pointer_speed_write(&mut self, key: &DeviceKey) -> Option<u64> {
+        let flight = self.take_flight();
+        let read = self.pointer_speed.get_mut(key)?;
+        read.flight = flight;
+        read.load = Load::Loading;
+        Some(flight)
+    }
+
+    pub(crate) fn finish_pointer_speed_write(
+        &mut self,
+        key: &DeviceKey,
+        flight: u64,
+        speed: PointerSpeed,
+        result: Result<(), WriteError>,
+    ) -> bool {
+        if self
+            .pointer_speed
+            .get(key)
+            .is_none_or(|read| read.flight != flight)
+        {
+            return false;
+        }
+        match result {
+            Ok(()) => self.set_pointer_speed_ready(key, speed),
+            Err(error) => {
+                if let Some(read) = self.pointer_speed.get_mut(key) {
+                    read.load = Load::Failed(error.to_string());
+                }
+            }
+        }
+        true
     }
 
     fn cache(&self) -> Option<(SwrClient, Arc<dyn Runtime>)> {
@@ -405,17 +541,17 @@ impl DeviceReads {
         ))
     }
 
-    fn clear<T>(&self, kind: &'static str, key: &DeviceKey)
+    fn clear<T>(&self, read: DeviceRead<T>)
     where
         T: MaybeSend + MaybeSync + 'static,
     {
-        let Some(client) = &self.client else {
-            return;
-        };
-        // Drop subscribers before this call. `set(None)` fences the old flight;
-        // invalidation then leaves the empty entry stale for the next route.
-        client.set::<_, Cached<T>, WriteError>(query_key(kind, key), None);
-        client.invalidate(query_key(kind, key));
+        if let Some(client) = &self.client {
+            // Cancel/fence the old fetch without invalidating an adapter whose
+            // asynchronous unsubscribe may not have run yet. A replacement
+            // subscription gets a new flight key and cannot inherit this cache.
+            client.set::<_, Cached<T>, WriteError>(read.cache_key.clone(), None);
+        }
+        drop(read);
     }
 
     fn take_flight(&mut self) -> u64 {
@@ -450,6 +586,26 @@ impl DeviceReads {
         true
     }
 
+    fn update_pointer_speed(
+        &mut self,
+        key: &DeviceKey,
+        flight: u64,
+        load: PointerSpeedLoad,
+    ) -> bool {
+        let Some(read) = self
+            .pointer_speed
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
     fn update_smartshift(&mut self, key: &DeviceKey, flight: u64, load: SmartShiftLoad) -> bool {
         let Some(read) = self
             .smartshift
@@ -466,8 +622,8 @@ impl DeviceReads {
     }
 }
 
-fn query_key(kind: &'static str, key: &DeviceKey) -> (&'static str, &'static str, String) {
-    (ROOT, kind, key.to_string())
+fn query_key(kind: &'static str, key: &DeviceKey, flight: u64) -> ReadKey {
+    (ROOT, kind, format!("{key}:{flight}"))
 }
 
 async fn read_ipc<T>(
@@ -514,11 +670,7 @@ fn dpi_error_is_permanent(error: &WriteError) -> bool {
     )
 }
 
-fn smartshift_error_is_permanent(error: &WriteError) -> bool {
-    matches!(error, WriteError::FeatureUnsupported { .. })
-}
-
-fn fn_lock_error_is_permanent(error: &WriteError) -> bool {
+fn feature_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
@@ -651,7 +803,7 @@ mod tests {
         let validating = state(Some(Arc::new(Some(optimistic.clone()))), None, false, true);
 
         assert_eq!(
-            project_load(&validating, smartshift_error_is_permanent),
+            project_load(&validating, feature_error_is_permanent),
             Load::Ready(optimistic.clone()),
             "the optimistic value stays visible while confirmation is in flight"
         );
@@ -667,7 +819,7 @@ mod tests {
     #[tokio::test]
     async fn transient_reads_keep_the_three_attempt_budget() {
         assert_eq!(
-            attempt_count(WriteError::AgentUnavailable, smartshift_error_is_permanent).await,
+            attempt_count(WriteError::AgentUnavailable, feature_error_is_permanent).await,
             3
         );
     }
@@ -679,7 +831,7 @@ mod tests {
                 WriteError::FeatureUnsupported {
                     feature_hex: 0x2111,
                 },
-                smartshift_error_is_permanent,
+                feature_error_is_permanent,
             )
             .await,
             1

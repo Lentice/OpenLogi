@@ -1,4 +1,5 @@
 use super::*;
+mod pointer_speed;
 use hidpp::feature::extended_dpi::{DpiRange, Lod};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;

@@ -67,7 +67,10 @@ pub use succession::Identity;
 ///      `HidppOperation::ReadFnLock` appended.
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
-pub const PROTOCOL_VERSION: u32 = 34;
+/// v35: Append pointer-speed read/write methods and HID++ operation variants;
+///      append `Capabilities.pointer_speed` for HID++ motion scaling.
+/// v36: Append measured `Capabilities.smartshift` for independent panel selection.
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -583,4 +586,13 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Read the device-side pointer multiplier, distinct from sensor DPI.
+    async fn read_pointer_speed(
+        route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::PointerSpeed, WriteError>;
+    /// Write and verify the device-side pointer multiplier.
+    async fn set_pointer_speed(
+        route: DeviceRoute,
+        speed: openlogi_core::hid::PointerSpeed,
+    ) -> Result<(), WriteError>;
 }

@@ -259,6 +259,8 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
         display_name: name.to_string(),
         kind: DeviceKind::Mouse,
         capabilities: Capabilities {
+            pointer_speed: false,
+            smartshift: false,
             buttons: true,
             pointer: true,
             lighting: false,

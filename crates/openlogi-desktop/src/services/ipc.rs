@@ -61,9 +61,9 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
-    RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting,
-    SetSmartShift, StartPairing, UnpairDevice,
+    CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadPointerSpeed, ReadSmartShift,
+    ReloadConfig, RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower,
+    SetLighting, SetPointerSpeed, SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -98,6 +98,13 @@ pub enum GuiUpdate {
     },
     /// Whether the agent adopted the config currently on disk.
     ConfigReloadResult(Result<(), ConfigReloadError>),
+    /// A verified speed write, identified by its device-read flight.
+    PointerSpeedWritten {
+        key: DeviceKey,
+        flight: u64,
+        speed: openlogi_core::hid::PointerSpeed,
+        result: Result<(), WriteError>,
+    },
     /// What a keyboard reports after an Fn-lock write the GUI asked for: the
     /// state it took, or the typed refusal. Answers [`SetFnLock`].
     FnLockWritten {

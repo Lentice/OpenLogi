@@ -138,6 +138,12 @@ pub struct Capabilities {
     /// fn inversion. Appended: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub fn_lock: bool,
+    /// Device-side pointer scaling — HID++ `0x2205`, independent of sensor DPI.
+    #[serde(default)]
+    pub pointer_speed: bool,
+    /// Native SmartShift wheel mode and threshold — HID++ `0x2110` / `0x2111`.
+    #[serde(default)]
+    pub smartshift: bool,
 }
 
 impl Capabilities {
@@ -162,6 +168,8 @@ impl Capabilities {
             haptic_panel: false,
             dpi_gestures: false,
             fn_lock: ids.contains(&0x40a2) || ids.contains(&0x40a3),
+            pointer_speed: ids.contains(&0x2205),
+            smartshift: ids.contains(&0x2110) || ids.contains(&0x2111),
         }
     }
 
@@ -176,6 +184,7 @@ impl Capabilities {
             DeviceKind::Mouse | DeviceKind::Trackball => Self {
                 buttons: true,
                 pointer: true,
+                smartshift: true,
                 ..Self::default()
             },
             DeviceKind::Keyboard => Self {
@@ -481,6 +490,8 @@ mod tests {
                     extended_model_id: 0x02,
                 }),
                 capabilities: Some(Capabilities {
+                    pointer_speed: false,
+                    smartshift: false,
                     buttons: true,
                     pointer: true,
                     lighting: false,
@@ -553,6 +564,8 @@ mod tests {
         assert_eq!(
             mouse,
             Capabilities {
+                pointer_speed: false,
+                smartshift: true,
                 buttons: true,
                 pointer: true,
                 lighting: false,
@@ -566,11 +579,18 @@ mod tests {
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
+        let smartshift = Capabilities::from_feature_ids(&[0x2110]);
+        assert!(smartshift.smartshift);
+        assert!(!smartshift.pointer);
+        assert!(!smartshift.pointer_speed);
+        assert!(Capabilities::from_feature_ids(&[0x2111]).smartshift);
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
         let keyboard = Capabilities::from_feature_ids(&[0x0001, 0x8080]);
         assert_eq!(
             keyboard,
             Capabilities {
+                pointer_speed: false,
+                smartshift: false,
                 buttons: false,
                 pointer: false,
                 lighting: true,

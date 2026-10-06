@@ -187,6 +187,11 @@ select_device_button_description = "Выберите кнопку на устр�
 remove_profile_description = "Пользовательские привязки кнопок в этом профиле будут удалены. Стандартные привязки не изменятся."
 
 [pointer]
+speed_retry = "Read or write failed. Click to retry."
+speed_offline = "Movement speed is unavailable while the mouse is offline."
+speed = "Movement speed"
+speed_description = "Adjust the mouse movement multiplier. 1× is the original speed; sensor DPI stays unchanged."
+reading_speed = "Reading movement speed…"
 mouse_button_profiles = "Профили кнопок мыши"
 mouse_profile_pointer = "Указатель мыши"
 mouse_profile_focused = "Приложение в фокусе"

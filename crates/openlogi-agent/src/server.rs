@@ -96,6 +96,32 @@ impl AgentServer {
               future off a dozen of them with `std::future::ready`"
 )]
 impl Agent for AgentServer {
+    async fn read_pointer_speed(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::PointerSpeed, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadPointerSpeed, |c| async move {
+                openlogi_hid::get_pointer_speed_on(&c).await
+            })
+            .await
+    }
+
+    async fn set_pointer_speed(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        speed: openlogi_core::hid::PointerSpeed,
+    ) -> Result<(), WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::WritePointerSpeed, |c| async move {
+                openlogi_hid::set_pointer_speed_on(&c, speed).await
+            })
+            .await
+    }
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
     }

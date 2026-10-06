@@ -23,6 +23,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
+use crate::features::pointer::speed::SpeedPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::user_cache_root;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent, StateEvents};
@@ -87,6 +88,27 @@ enum DetailTab {
     Device,
 }
 
+/// Hardware cards composed by the Pointer tab. Selection shares the tab owner.
+#[derive(Default)]
+struct PointerPanels {
+    dpi: bool,
+    speed: bool,
+    smartshift: bool,
+}
+
+impl PointerPanels {
+    fn for_device(record: &DeviceRecord) -> Self {
+        let caps = record
+            .capabilities
+            .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
+        Self {
+            dpi: caps.pointer,
+            speed: caps.pointer_speed,
+            smartshift: caps.smartshift,
+        }
+    }
+}
+
 impl DetailTab {
     /// The detail sections shown for `record`, in tab order. Always non-empty:
     /// every device gets at least the info tab.
@@ -128,7 +150,8 @@ impl DetailTab {
         if matches!(record.kind, DeviceKind::Keyboard) && (caps.buttons || record.asset.is_some()) {
             tabs.push(Self::Keys);
         }
-        if caps.pointer {
+        let pointer = PointerPanels::for_device(record);
+        if pointer.dpi || pointer.speed || pointer.smartshift {
             tabs.push(Self::Pointer);
         }
         if caps.lighting {
@@ -170,6 +193,7 @@ pub struct AppView {
     action_ring_panel: Entity<ActionRingPanel>,
     keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
+    speed_panel: Entity<SpeedPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
@@ -243,6 +267,7 @@ impl AppView {
         let action_ring_panel = cx.new(ActionRingPanel::new);
         let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
+        let speed_panel = cx.new(SpeedPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
@@ -285,6 +310,7 @@ impl AppView {
                 // caches no localized text. A refused removal is a dialog,
                 // opened through `removal_obs`.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::PointerSpeedChanged(_)
                 | StateEvent::DeviceRemovalFailed { .. }
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
@@ -310,6 +336,7 @@ impl AppView {
             action_ring_panel,
             keyboard_model,
             dpi_panel,
+            speed_panel,
             smartshift_panel,
             lighting_panel,
             camera_preview,
@@ -627,6 +654,7 @@ impl AppView {
                         action_ring: &self.action_ring_panel,
                         keyboard_model: &self.keyboard_model,
                         dpi_panel: &self.dpi_panel,
+                        speed_panel: &self.speed_panel,
                         smartshift_panel: &self.smartshift_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,

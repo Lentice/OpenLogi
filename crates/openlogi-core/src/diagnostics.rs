@@ -589,6 +589,8 @@ mod tests {
                     online: false,
                     battery: None,
                     capabilities: Some(Capabilities {
+                        pointer_speed: false,
+                        smartshift: false,
                         buttons: true,
                         pointer: true,
                         lighting: false,

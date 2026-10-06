@@ -20,7 +20,7 @@ use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::DeviceRoute;
 
 use super::widgets::{back_button, kind_label, route_label, sidebar_action, status_badge};
-use super::{AppView, DetailTab};
+use super::{AppView, DetailTab, PointerPanels};
 use crate::app::menu::file_url;
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
@@ -32,6 +32,7 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
+use crate::features::pointer::speed::SpeedPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
@@ -93,6 +94,7 @@ pub(super) struct DetailPanels<'a> {
     pub action_ring: &'a gpui::Entity<ActionRingPanel>,
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
+    pub speed_panel: &'a gpui::Entity<SpeedPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
@@ -123,9 +125,13 @@ pub(super) fn detail_content(
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
-        DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
-        }
+        DetailTab::Pointer => pointer_tab(
+            panels.dpi_panel,
+            panels.speed_panel,
+            panels.smartshift_panel,
+            cx,
+        )
+        .into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -308,10 +314,14 @@ fn action_ring_tab(
 /// controls don't force a vertical scroll.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
+    speed_panel: &gpui::Entity<SpeedPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
+    let panels = AppState::try_read(cx)
+        .and_then(|state| state.current_record())
+        .map_or_else(PointerPanels::default, PointerPanels::for_device);
     tab_body(
         ContentWidth::Large,
         h_flex()
@@ -319,22 +329,36 @@ fn pointer_tab(
             .items_stretch()
             .gap_4()
             .flex_wrap()
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("device.pointer_tuning"),
-                    Icon::empty().path("action-icons/gauge.svg"),
-                    dpi_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("pointer.smartshift"),
-                    Icon::empty().path("action-icons/refresh-cw.svg"),
-                    smartshift_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
+            .when(panels.dpi, |row| {
+                row.child(pointer_grid_card(
+                    PanelCard::new(
+                        tr!("device.pointer_tuning"),
+                        Icon::empty().path("action-icons/gauge.svg"),
+                        dpi_panel.clone().into_any_element(),
+                    )
+                    .fill(),
+                ))
+            })
+            .when(panels.speed, |row| {
+                row.child(pointer_grid_card(
+                    PanelCard::new(
+                        tr!("pointer.speed"),
+                        Icon::empty().path("action-icons/gauge.svg"),
+                        speed_panel.clone().into_any_element(),
+                    )
+                    .fill(),
+                ))
+            })
+            .when(panels.smartshift, |row| {
+                row.child(pointer_grid_card(
+                    PanelCard::new(
+                        tr!("pointer.smartshift"),
+                        Icon::empty().path("action-icons/refresh-cw.svg"),
+                        smartshift_panel.clone().into_any_element(),
+                    )
+                    .fill(),
+                ))
+            })
             .child(
                 div()
                     .min_w(POINTER_CARD_MIN_W)

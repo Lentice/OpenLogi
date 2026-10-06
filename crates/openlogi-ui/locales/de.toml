@@ -187,6 +187,11 @@ select_device_button_description = "Wähle eine Taste am Gerät aus, um ihre Fun
 remove_profile_description = "Dadurch werden die eigenen Tastenzuweisungen dieses Profils gelöscht. Standardzuweisungen bleiben erhalten."
 
 [pointer]
+speed_retry = "Read or write failed. Click to retry."
+speed_offline = "Movement speed is unavailable while the mouse is offline."
+speed = "Movement speed"
+speed_description = "Adjust the mouse movement multiplier. 1× is the original speed; sensor DPI stays unchanged."
+reading_speed = "Reading movement speed…"
 mouse_button_profiles = "Maustastenprofile"
 mouse_profile_pointer = "Mauszeiger"
 mouse_profile_focused = "Fokussierte Anwendung"

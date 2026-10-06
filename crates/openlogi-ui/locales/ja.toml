@@ -187,6 +187,11 @@ select_device_button_description = "動作を変更するボタンをデバイ�
 remove_profile_description = "このプロファイルのカスタムボタン割り当てを削除します。デフォルトの割り当てには影響しません。"
 
 [pointer]
+speed_retry = "Read or write failed. Click to retry."
+speed_offline = "Movement speed is unavailable while the mouse is offline."
+speed = "Movement speed"
+speed_description = "Adjust the mouse movement multiplier. 1× is the original speed; sensor DPI stays unchanged."
+reading_speed = "Reading movement speed…"
 mouse_button_profiles = "マウスボタンのプロファイル"
 mouse_profile_pointer = "マウスポインター"
 mouse_profile_focused = "フォーカス中のアプリ"

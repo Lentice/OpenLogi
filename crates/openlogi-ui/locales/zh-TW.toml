@@ -187,6 +187,11 @@ select_device_button_description = "選擇裝置上的按鍵以變更其功能�
 remove_profile_description = "這會刪除此設定檔的自訂按鍵指派，不會影響預設指派。"
 
 [pointer]
+speed_retry = "讀取或寫入失敗。按此重新讀取。"
+speed_offline = "滑鼠離線，無法調整移動速度。"
+speed = "滑鼠移動速度"
+speed_description = "調整滑鼠內建的移動倍率；1× 為原本速度，感測器 DPI 維持不變。"
+reading_speed = "正在讀取滑鼠速度…"
 mouse_button_profiles = "滑鼠按鍵設定檔"
 mouse_profile_pointer = "滑鼠指標"
 mouse_profile_focused = "焦點應用程式"

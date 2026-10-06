@@ -187,6 +187,11 @@ select_device_button_description = "Vælg en knap på enheden for at ændre dens
 remove_profile_description = "Dette sletter profilens brugerdefinerede knaptildelinger. Standardtildelinger påvirkes ikke."
 
 [pointer]
+speed_retry = "Read or write failed. Click to retry."
+speed_offline = "Movement speed is unavailable while the mouse is offline."
+speed = "Movement speed"
+speed_description = "Adjust the mouse movement multiplier. 1× is the original speed; sensor DPI stays unchanged."
+reading_speed = "Reading movement speed…"
 mouse_button_profiles = "Profiler for museknapper"
 mouse_profile_pointer = "Musemarkør"
 mouse_profile_focused = "App med fokus"

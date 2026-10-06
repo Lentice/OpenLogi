@@ -1,5 +1,5 @@
 use super::home::{connection_icon_path, ordered_device_indices};
-use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, PointerPanels};
 use crate::services::assets::ResolvedAsset;
 use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
 use openlogi_core::device::{
@@ -225,6 +225,8 @@ fn gallery_order_moves_connected_devices_first_stably() {
 #[test]
 fn tabs_follow_capabilities_not_kind() {
     let caps = Some(Capabilities {
+        pointer_speed: false,
+        smartshift: false,
         buttons: true,
         pointer: true,
         lighting: false,
@@ -243,12 +245,28 @@ fn tabs_follow_capabilities_not_kind() {
     assert!(!tabs.contains(&DetailTab::Lighting));
 }
 
+#[test]
+fn m720_has_pointer_settings_without_adjustable_dpi() {
+    let caps = Capabilities::from_feature_ids(&[0x1b04, 0x2121, 0x2205]);
+    assert!(!caps.pointer);
+    assert!(caps.pointer_speed);
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, Some(caps)));
+    assert!(tabs.contains(&DetailTab::Pointer));
+    assert!(tabs.contains(&DetailTab::Buttons));
+    let panels = PointerPanels::for_device(&record(DeviceKind::Mouse, Some(caps)));
+    assert!(panels.speed);
+    assert!(!panels.dpi);
+    assert!(!panels.smartshift);
+}
+
 /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
 /// asset should not get the mouse-model Buttons panel — the generic mouse
 /// hotspot layout (Middle Click, DPI Toggle, …) is wrong for a keyboard.
 #[test]
 fn keyboard_without_asset_hides_buttons_tab() {
     let caps = Some(Capabilities {
+        pointer_speed: false,
+        smartshift: false,
         buttons: true,
         pointer: false,
         lighting: true,
@@ -271,6 +289,8 @@ fn keyboard_without_asset_hides_buttons_tab() {
 #[test]
 fn keyboard_with_buttons_shows_keys_tab() {
     let caps = Some(Capabilities {
+        pointer_speed: false,
+        smartshift: false,
         buttons: true,
         pointer: false,
         lighting: true,

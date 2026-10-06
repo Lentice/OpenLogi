@@ -106,6 +106,27 @@ impl TestAgent {
     reason = "the in-process IPC service intentionally returns immediate scripted values"
 )]
 impl Agent for TestAgent {
+    async fn read_pointer_speed(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::PointerSpeed, WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x2205,
+        })
+    }
+
+    async fn set_pointer_speed(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _speed: openlogi_core::hid::PointerSpeed,
+    ) -> Result<(), WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x2205,
+        })
+    }
+
     async fn protocol_version(self, _: TarpcContext) -> u32 {
         PROTOCOL_VERSION
     }

@@ -99,7 +99,15 @@ Common device fields are:
 - `host_switch_targets` and `fn_lock` for compatible keyboards
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
-The M720 button beneath the thumb rest uses the normal `GestureButton` binding,
+M720 uses a fixed sensor DPI and HID++ `0x2205` movement scaling instead.
+Its Pointer panel saves `pointer_speed` per device in Q8.8 units: `256` is
+1×, `384` is 1.5×, and `128` is 0.5×. Values must be between `46` and `511`
+(about 0.18×–2×). An omitted setting leaves the device's current speed alone;
+OpenLogi reapplies a configured value on startup and reconnect. This changes
+the mouse's own movement reports, independently of the OS pointer setting.
+The Pointer panel saves a new speed only after the device accepts it and an
+independent readback confirms it. Reads on reconnect wait for restoration.
+The button beneath the thumb rest uses the normal `GestureButton` binding,
 including single actions, long presses, and gestures.
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or

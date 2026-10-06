@@ -34,9 +34,11 @@ use crate::receiver_access::ReceiverAccess;
 mod context;
 mod fn_lock;
 mod light;
+mod restoration;
 
 pub use context::HardwareContext;
 pub(crate) use fn_lock::{FnLockOrder, FnLockTicket};
+pub use restoration::DeviceRestoration;
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
 /// own, so without this an asleep / unresponsive device would hang (and leak)
@@ -88,6 +90,8 @@ pub struct DeviceAccess {
     pub receiver_access: ReceiverAccess,
     /// Host-lifecycle gate shared by every producer of proactive device I/O.
     pub device_io: DeviceIoGate,
+    /// Reconnect work that must finish before an ordinary device read or write.
+    pub restoration: DeviceRestoration,
 }
 
 impl DeviceAccess {
@@ -154,7 +158,7 @@ impl DeviceOp {
         .map_err(|_| Unresolved::NoChannel)
     }
 
-    /// Lease the receiver, resolve the authoritative channel, then run `f`
+    /// Wait for reconnect restoration, lease the receiver, resolve the channel, then run `f`
     /// against it under `WRITE_TIMEOUT`, mapping a timeout to
     /// [`WriteError::RequestTimedOut`].
     ///
@@ -175,6 +179,11 @@ impl DeviceOp {
         if !self.access.device_io.allows_io() {
             return Err(WriteError::DeviceNotFound);
         }
+        timed(op, async {
+            self.access.restoration.wait(&self.route).await;
+            Ok(())
+        })
+        .await?;
         let _lease = self.access.receiver_access.acquire_for_io().await;
         let shared = self.resolve()?;
         timed(op, f(shared)).await
@@ -192,6 +201,7 @@ impl DeviceOp {
             registry,
             receiver_access,
             device_io,
+            restoration: _,
         } = self.access;
         let route = self.route.clone();
         let (r, g, b) = lighting_rgb(lighting);
@@ -385,6 +395,8 @@ pub struct VolatileMouseSettings {
     pub dpi: Option<Dpi>,
     /// SmartShift mode and thresholds.
     pub smartshift: Option<SmartShiftStatus>,
+    /// Device-side pointer multiplier, independent of sensor DPI.
+    pub pointer_speed: Option<openlogi_core::hid::PointerSpeed>,
 }
 
 impl VolatileMouseSettings {
@@ -414,6 +426,7 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
         wheel,
         dpi,
         smartshift,
+        pointer_speed,
     } = settings;
     let shared = match op.resolve() {
         Ok(shared) => shared,
@@ -425,7 +438,11 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
     let receiver_access = op.access.receiver_access.clone();
     let device_io = op.access.device_io.clone();
     let index = op.route.device_index();
+    // Register on the publishing thread, before the worker can be scheduled
+    // and before inventory exposes this device to IPC readers.
+    let restoration = op.access.restoration.begin(&op.route);
     std::thread::spawn(move || {
+        let _restoration = restoration;
         let Some(rt) = one_shot_runtime("volatile reapply") else {
             return;
         };
@@ -458,6 +475,16 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
                 .await;
                 log_outcome(index, "SmartShift write", result, |()| {
                     debug!(index, status = ?ss, "SmartShift config written");
+                });
+            }
+            if let Some(speed) = pointer_speed {
+                let result = tokio::time::timeout(
+                    WRITE_TIMEOUT,
+                    openlogi_hid::set_pointer_speed_on(&shared, speed),
+                )
+                .await;
+                log_outcome(index, "pointer speed write", result, |()| {
+                    debug!(index, %speed, "pointer speed written to device");
                 });
             }
         });
@@ -629,6 +656,7 @@ mod tests {
             registry: registry.clone(),
             receiver_access: receiver_access.clone(),
             device_io: device_io.clone(),
+            restoration: DeviceRestoration::default(),
         }
         .op(route)
     }
@@ -670,6 +698,58 @@ mod tests {
             vendor_id: 0x046d,
             product_id: 0xc52b,
         }
+    }
+
+    #[tokio::test]
+    async fn device_read_waits_for_registered_reconnect_restoration() {
+        let route = unresolvable_route();
+        let access = DeviceAccess {
+            channel: std::sync::Arc::new(RwLock::new(None)),
+            registry: ChannelRegistry::default(),
+            receiver_access: ReceiverAccess::default(),
+            device_io: device_io_channel().1,
+            restoration: DeviceRestoration::default(),
+        };
+        let restore = access.restoration.begin(&route);
+        let read = access
+            .op(&route)
+            .run(HidppOperation::ReadPointerSpeed, |_| async {
+                Ok::<(), WriteError>(())
+            });
+        tokio::pin!(read);
+        assert!(
+            futures_lite::future::poll_once(&mut read).await.is_none(),
+            "read must not resolve the device before its restoration worker completes"
+        );
+        drop(restore);
+        assert!(matches!(read.await, Err(WriteError::DeviceNotFound)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_restoration_bounds_reads_and_releases_after_cancellation() {
+        let route = unresolvable_route();
+        let access = DeviceAccess {
+            channel: std::sync::Arc::new(RwLock::new(None)),
+            registry: ChannelRegistry::default(),
+            receiver_access: ReceiverAccess::default(),
+            device_io: device_io_channel().1,
+            restoration: DeviceRestoration::default(),
+        };
+        let restore = access.restoration.begin(&route);
+        let result = access
+            .op(&route)
+            .run(HidppOperation::ReadPointerSpeed, |_| async {
+                Ok::<(), WriteError>(())
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(WriteError::RequestTimedOut {
+                operation: HidppOperation::ReadPointerSpeed
+            })
+        ));
+        drop(restore);
+        access.restoration.wait(&route).await;
     }
 
     /// `DeviceOp::run` must fail fast on a registry miss ([`DeviceNotFound`])

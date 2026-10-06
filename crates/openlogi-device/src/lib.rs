@@ -80,3 +80,6 @@ pub use write::{
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
 };
+pub use write::{
+    PointerSpeed, get_pointer_speed, get_pointer_speed_on, set_pointer_speed, set_pointer_speed_on,
+};

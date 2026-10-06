@@ -187,6 +187,11 @@ select_device_button_description = "Selecciona un botón del dispositivo para ca
 remove_profile_description = "Se eliminarán las asignaciones personalizadas de este perfil. Las predeterminadas no cambiarán."
 
 [pointer]
+speed_retry = "Read or write failed. Click to retry."
+speed_offline = "Movement speed is unavailable while the mouse is offline."
+speed = "Movement speed"
+speed_description = "Adjust the mouse movement multiplier. 1× is the original speed; sensor DPI stays unchanged."
+reading_speed = "Reading movement speed…"
 mouse_button_profiles = "Perfiles de botones del ratón"
 mouse_profile_pointer = "Puntero del ratón"
 mouse_profile_focused = "Aplicación con el foco"

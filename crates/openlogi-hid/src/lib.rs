@@ -38,5 +38,6 @@ pub use host::{
     set_scroll_inversion, set_scroll_resolution, set_scroll_wheel_mode, set_smartshift,
     set_smartshift_sensitivity, toggle_smartshift, watch_hotplug,
 };
+pub use host::{get_pointer_speed, set_pointer_speed};
 pub use lighting::{set_keyboard_color_on, set_keyboard_color_with_on};
 pub use probe_cache::FileProbeCacheStore;

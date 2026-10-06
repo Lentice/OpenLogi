@@ -66,6 +66,21 @@ pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
     device::set_dpi(&*native_backend(), route, dpi).await
 }
 
+/// Read this device's pointer movement multiplier.
+pub async fn get_pointer_speed(
+    route: &DeviceRoute,
+) -> Result<openlogi_core::hid::PointerSpeed, WriteError> {
+    device::get_pointer_speed(&*native_backend(), route).await
+}
+
+/// Write and verify this device's pointer movement multiplier.
+pub async fn set_pointer_speed(
+    route: &DeviceRoute,
+    speed: openlogi_core::hid::PointerSpeed,
+) -> Result<(), WriteError> {
+    device::set_pointer_speed(&*native_backend(), route, speed).await
+}
+
 /// Read the SmartShift mode, threshold and torque of the device `route` reaches.
 pub async fn get_smartshift_status(route: &DeviceRoute) -> Result<SmartShiftStatus, WriteError> {
     device::get_smartshift_status(&*native_backend(), route).await

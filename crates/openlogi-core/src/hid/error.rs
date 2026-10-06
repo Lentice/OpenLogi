@@ -136,6 +136,10 @@ pub enum HidppOperation {
     /// Read keyboard Fn-lock (fn inversion). Appended last — variant order is
     /// wire format.
     ReadFnLock,
+    /// Read device-side pointer scaling.
+    ReadPointerSpeed,
+    /// Write device-side pointer scaling.
+    WritePointerSpeed,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

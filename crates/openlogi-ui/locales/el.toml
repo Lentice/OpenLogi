@@ -187,6 +187,11 @@ select_device_button_description = "Επιλέξτε ένα κουμπί στη 
 remove_profile_description = "Διαγράφονται οι προσαρμοσμένες αντιστοιχίσεις κουμπιών αυτού του προφίλ. Οι προεπιλεγμένες δεν επηρεάζονται."
 
 [pointer]
+speed_retry = "Read or write failed. Click to retry."
+speed_offline = "Movement speed is unavailable while the mouse is offline."
+speed = "Movement speed"
+speed_description = "Adjust the mouse movement multiplier. 1× is the original speed; sensor DPI stays unchanged."
+reading_speed = "Reading movement speed…"
 mouse_button_profiles = "Προφίλ κουμπιών ποντικιού"
 mouse_profile_pointer = "Δείκτης ποντικιού"
 mouse_profile_focused = "Εφαρμογή με εστίαση"

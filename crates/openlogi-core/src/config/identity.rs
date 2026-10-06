@@ -314,6 +314,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(camera_profile);
     fold_option_field!(thumbwheel_sensitivity);
     fold_option_field!(fn_lock);
+    fold_option_field!(pointer_speed);
     // The user-assigned alias. Without this a legacy entry carrying a name
     // folded into a canonical entry with none would drop it silently — the
     // one field here a user typed by hand, so the loss is the most visible.
@@ -424,6 +425,17 @@ mod tests {
             .resolve_device_key(&cabled(), Some(&unit))
             .expect("a non-zero unit is a physical identity");
         assert_eq!(key.as_str(), "unit:6be9d300");
+    }
+
+    #[test]
+    fn pointer_speed_survives_identity_adoption() {
+        let speed = crate::hid::PointerSpeed::try_new(384).expect("1.5×");
+        let mut config = Config::default();
+        config.set_pointer_speed("receiver:82839805:slot:1", speed);
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("identity");
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+        assert_eq!(config.pointer_speed(canonical.as_str()), Some(speed));
+        assert!(!config.devices.contains_key("receiver:82839805:slot:1"));
     }
 
     #[test]

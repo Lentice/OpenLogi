@@ -3,6 +3,25 @@
 use super::*;
 
 #[test]
+fn pointer_speed_roundtrips_without_claiming_sensor_dpi() {
+    use crate::hid::PointerSpeed;
+    let mut config = Config::default();
+    let speed = PointerSpeed::try_new(384).expect("1.5×");
+    config.set_pointer_speed("m720", speed);
+    let restored = write_and_read(&config);
+    assert_eq!(restored.pointer_speed("m720"), Some(speed));
+    assert_eq!(restored.pointer_speed("other"), None);
+    assert_eq!(restored.dpi("m720"), None);
+    toml::from_str::<DeviceConfig>("pointer_speed = 512")
+        .expect_err("invalid speed must not enter config");
+    assert!(
+        !toml::to_string(&DeviceConfig::default())
+            .expect("TOML")
+            .contains("pointer_speed")
+    );
+}
+
+#[test]
 fn dpi_roundtrips_per_device() {
     let mut cfg = Config::default();
     cfg.set_dpi("2b042", Dpi::new(1600));

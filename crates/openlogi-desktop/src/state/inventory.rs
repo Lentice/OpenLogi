@@ -145,15 +145,16 @@ impl AppState {
             "inventory refreshed"
         );
 
-        // A device that came back on a different route must re-run its device
-        // queries — their subscriptions targeted the now-dead route.
+        // A route or online-state transition retires queries and pending writes.
+        // Offline devices cannot subscribe again; waking on the same route must
+        // still read fresh values after the agent restores volatile settings.
         let rerouted: Vec<DeviceKey> = merged_list
             .iter()
             .filter(|new| {
-                self.devices
-                    .records
-                    .iter()
-                    .any(|old| old.config_key == new.config_key && old.route != new.route)
+                self.devices.records.iter().any(|old| {
+                    old.config_key == new.config_key
+                        && (old.route != new.route || old.online != new.online)
+                })
             })
             .map(DeviceRecord::device_key)
             .collect();
