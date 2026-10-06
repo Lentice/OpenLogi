@@ -74,7 +74,7 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
 /// so the marker translation is:
 ///
 /// ```text
-/// bbox_w_rendered = mouse_w * origin.width  / png.width
+/// bbox_w_rendered = min(mouse_w, mouse_h * origin.width / origin.height)
 /// bbox_x_offset   = (mouse_w - bbox_w_rendered) / 2
 /// hotspot.x       = bbox_x_offset + marker.x / 100 * bbox_w_rendered
 /// hotspot.y       = marker.y / 100 * mouse_h     // height ratio is 1:1
@@ -88,17 +88,18 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
 )]
 pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<Hotspot> {
-    let png_w = asset.png_width as f32;
-    let origin_w = asset
+    // Origins can be logical dimensions rather than PNG pixels (M720 uses
+    // 396x396 for a 1228x1920 render). Preserve their aspect, not their absolute
+    // pixel count. A logical canvas wider than the PNG spans the whole image.
+    let bbox_w_rendered = asset
         .metadata
-        .origin()
-        .map_or(png_w, |o| o.width as f32)
-        .min(png_w);
-    let bbox_w_rendered = if png_w > 0. {
-        mouse_w * origin_w / png_w
-    } else {
-        mouse_w
-    };
+        .images
+        .iter()
+        .find(|image| image.key == "device_buttons_image")
+        .filter(|image| image.origin.height > 0)
+        .map_or(mouse_w, |image| {
+            (mouse_h * image.origin.width as f32 / image.origin.height as f32).min(mouse_w)
+        });
     let bbox_x_offset = (mouse_w - bbox_w_rendered) / 2.;
     let marker_to_canvas = |mx: f32, my: f32| -> (f32, f32) {
         let cx = bbox_x_offset + mx / 100. * bbox_w_rendered;
@@ -247,6 +248,53 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
 mod tests {
     use super::*;
     use crate::features::mouse::hotspots::default_hotspots;
+
+    fn marker_asset(origin: (u32, u32), png: (u32, u32)) -> ResolvedAsset {
+        ResolvedAsset {
+            depot: "geometry-test".into(),
+            display_name: "Geometry test".into(),
+            kind: None,
+            image_path: "side.png".into(),
+            hero_image_path: None,
+            glow: None,
+            metadata: openlogi_assets::Metadata {
+                images: vec![openlogi_assets::metadata::ImageEntry {
+                    key: "device_buttons_image".into(),
+                    origin: openlogi_assets::metadata::Origin {
+                        width: origin.0,
+                        height: origin.1,
+                    },
+                    assignments: vec![openlogi_assets::metadata::Assignment {
+                        slot_id: "test_c82".into(),
+                        slot_name: "SLOT_NAME_MIDDLE_BUTTON".into(),
+                        marker: openlogi_assets::metadata::Point { x: 66., y: 14. },
+                        label: openlogi_assets::metadata::Direction::default(),
+                    }],
+                }],
+            },
+            png_width: png.0,
+            png_height: png.1,
+        }
+    }
+
+    #[test]
+    fn m720_logical_canvas_markers_follow_the_full_buttons_image() {
+        // M720's metadata uses a 396-square logical canvas for a 1228x1920 PNG.
+        // The wheel marker is 66% across that image, not a 396-pixel inset.
+        let asset = marker_asset((396, 396), (1228, 1920));
+        let hotspot = asset_hotspots_for_png(&asset, 307., 480.)[0];
+        let (x, y) = hotspot.center();
+        assert!((x - 202.62).abs() < 0.01, "wheel x: {x}");
+        assert!((y - 67.2).abs() < 0.01, "wheel y: {y}");
+    }
+
+    #[test]
+    fn padded_markers_do_not_depend_on_png_resolution() {
+        let asset = marker_asset((687, 1024), (2048, 2048));
+        let (x, y) = asset_hotspots_for_png(&asset, 512., 512.)[0].center();
+        assert!((x - 310.96).abs() < 0.01, "wheel x: {x}");
+        assert!((y - 71.68).abs() < 0.01, "wheel y: {y}");
+    }
 
     #[test]
     fn default_labels_include_capability_gated_thumbwheel() {
