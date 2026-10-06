@@ -7,7 +7,7 @@ message: CLI subcommands reach the agent through crate::agent (connect, snapshot
 note: |
   Two subcommands once carried their own client kind and snapshot budget, and
   the fixture recorder a second copy of the same five seconds for its reads.
-  See "Single source of truth" in AGENTS.md.
+  See "Essential rules" in AGENTS.md.
 files:
   - crates/openlogi-cli/**/*.rs
 ignores:

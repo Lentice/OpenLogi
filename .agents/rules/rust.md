@@ -103,7 +103,7 @@ Encode invariants in the type system instead of checking them at runtime:
   the owning crate exports a function that applies it and returns a typed verdict
   (`openlogi_ipc::client::connect_as` → `ConnectError::Skew`) and keeps the raw input
   out of its public surface — a `pub` ingredient is an invitation to a second copy.
-  Root `AGENTS.md` ("Single source of truth") has the trigger and the ast-grep guard
+  Root `AGENTS.md` ("Essential rules") has the trigger and the ast-grep guard
   each consolidation ships with.
 - A `bool` parameter is boolean-blind at its call sites. When only a couple of
   combinations are ever used, split into intent-named methods

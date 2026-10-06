@@ -6,7 +6,7 @@ severity: error
 message: Reports are spelled by openlogi_fixture::format_hex; use it instead of a second hex table here.
 note: |
   The replay channel once carried a byte-for-byte copy of the cassette's
-  formatter. See "Single source of truth" in AGENTS.md.
+  formatter. See "Essential rules" in AGENTS.md.
 files:
   - crates/**/*.rs
   - xtask/**/*.rs

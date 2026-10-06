@@ -10,7 +10,7 @@ message: The capture slot and the channel registry travel as hardware::DeviceAcc
 note: |
   DeviceOp, ActionExecutor, ActionRuntime::new, both capture watchers' spawn
   functions, contexts and session channels, and two background writers each
-  listed the same handles field by field. See "Single source of truth" in
+  listed the same handles field by field. See "Essential rules" in
   AGENTS.md.
 files:
   - crates/openlogi-agent-core/**/*.rs

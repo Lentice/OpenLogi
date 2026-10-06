@@ -7,7 +7,7 @@ message: The Esc/F1–F19 keycode table is openlogi_core::config::FunctionKey's 
 note: |
   The run 0x7A, 0x78, 0x63 … was once written out in the Windows hook, the
   macOS injector and the GUI's key inspector as well as twice in core, with one
-  never-executed test guarding the drift. See "Single source of truth" in
+  never-executed test guarding the drift. See "Essential rules" in
   AGENTS.md.
 files:
   - crates/**/*.rs

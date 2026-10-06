@@ -6,7 +6,7 @@ severity: error
 message: The handshake is already bounded by openlogi_ipc::client::HANDSHAKE_TIMEOUT; a timeout around connect_as, probe_version, or a wrapper of them is a second, competing budget.
 note: |
   Four callers once wrapped the handshake in their own two seconds. See
-  "Single source of truth" in AGENTS.md.
+  "Essential rules" in AGENTS.md.
 files:
   - crates/**/*.rs
 ignores:

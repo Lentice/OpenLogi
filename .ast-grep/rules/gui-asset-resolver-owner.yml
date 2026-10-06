@@ -9,7 +9,7 @@ message: The runtime owns the AssetResolver (runtime.rs builds it once and repla
 note: |
   A resolver parses index.json when it is built and remembers every asset it
   has read, so a second one costs the parse again and is never told when a
-  download lands. Startup once built three. See "Single source of truth" in
+  download lands. Startup once built three. See "Essential rules" in
   AGENTS.md.
 files:
   - crates/openlogi-desktop/src/**/*.rs

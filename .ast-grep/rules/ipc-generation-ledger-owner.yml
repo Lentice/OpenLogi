@@ -8,7 +8,7 @@ severity: error
 message: Whether an observe answer is newer than what this connection has seen is openlogi_ipc::client::Observer's call (Observer::next yields only newer answers). Do not compare generations by hand here.
 note: |
   The desktop and the overlay once kept two ledgers, and one of them accepted
-  stale replies. See "Single source of truth" in AGENTS.md.
+  stale replies. See "Essential rules" in AGENTS.md.
 files:
   - crates/openlogi-desktop/**/*.rs
   - crates/openlogi-overlay/**/*.rs

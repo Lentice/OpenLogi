@@ -7,7 +7,7 @@ severity: error
 message: The Back and Forward control IDs are openlogi_device::reprog_controls' (BACK_CIDS, FORWARD_CIDS); name the family instead of respelling a CID here.
 note: |
   The capture session's divertable-button table once respelled all six CIDs
-  beside two constants nothing read. See "Single source of truth" in
+  beside two constants nothing read. See "Essential rules" in
   AGENTS.md.
 files:
   - crates/**/*.rs

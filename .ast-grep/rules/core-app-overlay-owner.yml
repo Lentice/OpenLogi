@@ -12,7 +12,7 @@ note: |
   action_ring.per_app looked the identifier up verbatim while
   per_app_bindings fell back to `exe:<filename>` (#643), so a Windows Store
   app kept its button overrides across an update and lost its ring layout.
-  See "Single source of truth" in AGENTS.md.
+  See "Essential rules" in AGENTS.md.
 files:
   - crates/**/*.rs
 ignores:

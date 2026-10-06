@@ -9,7 +9,7 @@ message: A watcher manager starts through WatcherHandle::spawn (or openlogi_core
 note: |
   The gesture, keyboard and host-switch watchers each hand-rolled the same
   thread::spawn + worker::runtime() shell, unnamed, and disagreed on what a
-  runtime-build failure reports. See "Single source of truth" in AGENTS.md.
+  runtime-build failure reports. See "Essential rules" in AGENTS.md.
 files:
   - crates/openlogi-agent-core/src/watchers/**/*.rs
 rule:

@@ -9,7 +9,7 @@ message: A restore that outlives its session is session::restore::PendingRestore
 note: |
   The capture and host-switch sessions each defined RetiredChannelPolicy and
   each kept a Weak to the retired channel beside an identical retry. See
-  "Single source of truth" in AGENTS.md.
+  "Essential rules" in AGENTS.md.
 files:
   - crates/openlogi-device/src/session/**/*.rs
 ignores:

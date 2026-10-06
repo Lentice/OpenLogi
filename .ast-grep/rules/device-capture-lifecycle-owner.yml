@@ -10,7 +10,7 @@ note: |
   The gesture and keyboard sessions each installed a listener and each ended
   with drop_listener_after(restore_after_stop(..)), the ordering that keeps a
   session the owner of every report its still-diverted controls send. See
-  "Single source of truth" in AGENTS.md.
+  "Essential rules" in AGENTS.md.
 files:
   - crates/openlogi-device/src/session/**/*.rs
 ignores:

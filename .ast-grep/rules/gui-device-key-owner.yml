@@ -10,7 +10,7 @@ message: A DeviceKey comes from DeviceRecord::device_key(). Take the key from th
 note: |
   DeviceKey once converted from any string, and it was built from an inventory
   key, from a key echoed back over a channel as a String, and as an empty
-  default standing for "no device". See "Single source of truth" in AGENTS.md.
+  default standing for "no device". See "Essential rules" in AGENTS.md.
 files:
   - crates/openlogi-desktop/src/**/*.rs
 ignores:

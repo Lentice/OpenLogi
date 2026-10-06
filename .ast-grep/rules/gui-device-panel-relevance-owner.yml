@@ -10,7 +10,7 @@ message: Whether a StateEvent concerns the device on screen is state::events' ca
 note: |
   Seven panels each carried a copy of the same subscription filter ending in
   `_ => false`, so a new StateEvent was silently ignored in all of them. See
-  "Single source of truth" in AGENTS.md.
+  "Essential rules" in AGENTS.md.
 files:
   - crates/openlogi-desktop/src/**/*.rs
 ignores:

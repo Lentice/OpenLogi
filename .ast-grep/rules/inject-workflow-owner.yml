@@ -10,7 +10,7 @@ note: |
   Each of the three backends carried its own copy of run_workflow,
   dispatch_script, the *_async thread wrappers and parse_shortcut — five
   functions, three times, drifting apart in what a TypeText step did. See
-  "Single source of truth" in AGENTS.md.
+  "Essential rules" in AGENTS.md.
 files:
   - crates/openlogi-inject/src/inject/*.rs
 rule:

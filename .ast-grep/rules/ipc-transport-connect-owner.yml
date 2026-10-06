@@ -6,7 +6,7 @@ severity: error
 message: The agent's socket is opened by openlogi_ipc::client (connect_as to talk to it, probe_version to judge a lock holder). Do not build a client on the raw transport here.
 note: |
   A hand-built client skips the version check and the declaration. See
-  "Single source of truth" in AGENTS.md.
+  "Essential rules" in AGENTS.md.
 files:
   - crates/**/*.rs
 ignores:

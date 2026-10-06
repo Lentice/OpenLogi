@@ -7,7 +7,7 @@ severity: error
 message: A profile's file and directory names are openlogi_core::paths' (CONFIG_FILE, config_dir_for, agent_socket_path_for, …); do not rebuild a path from its parts here.
 note: |
   The dev agent's socket path was rebuilt by hand in xtask, without the
-  XDG_RUNTIME_DIR rule the agent itself applies. See "Single source of truth"
+  XDG_RUNTIME_DIR rule the agent itself applies. See "Essential rules"
   in AGENTS.md.
 files:
   - crates/**/*.rs

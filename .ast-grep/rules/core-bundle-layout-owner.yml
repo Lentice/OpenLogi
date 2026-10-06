@@ -10,7 +10,7 @@ message: The app bundle's layout is openlogi_core::brand's (Helper, LOGIN_ITEMS_
 note: |
   Packaging, the app, and the agent each spelled the helper directories, and
   two crates each resolved a helper's bundle root from its executable. See
-  "Single source of truth" in AGENTS.md.
+  "Essential rules" in AGENTS.md.
 files:
   - crates/**/*.rs
   - xtask/**/*.rs

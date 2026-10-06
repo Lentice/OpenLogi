@@ -13,7 +13,7 @@ Use the smallest check that can disprove the change, then apply the required fin
    For branch work, include all changes against the intended base, not only the last
    commit. Preserve unrelated work. Check whether Rust-bearing rebases or conflict
    resolution occurred since the last full gate.
-2. Read the root [iteration policy](../../../AGENTS.md#verification-while-iterating-fast-path)
+2. Read the root [iteration policy](../../../AGENTS.md#essential-rules)
    and each changed area's scoped rules. For a push, also read the
    [local gate](../../../.agents/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
    This skill applies those policies; it does not make the pre-push gate mandatory

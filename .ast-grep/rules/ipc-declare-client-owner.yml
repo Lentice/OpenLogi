@@ -6,7 +6,7 @@ severity: error
 message: Declaring a client kind is part of the handshake in openlogi_ipc::client::connect_as, after the version check. Connect with connect_as(kind) instead of calling declare_client here.
 note: |
   Declaring is what arms a dormant agent; a client that has not verified the
-  protocol must never do it. See "Single source of truth" in AGENTS.md.
+  protocol must never do it. See "Essential rules" in AGENTS.md.
 files:
   - crates/**/*.rs
 ignores:

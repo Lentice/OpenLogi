@@ -10,7 +10,7 @@ note: |
   Ten sites hand-rolled the same slider, last-value, pending-value and
   subscription bundle, and they had drifted: the bound-order panic was
   documented in two of them, and one Settings slider was re-seated after a
-  failed save while its sibling was not. See "Single source of truth" in
+  failed save while its sibling was not. See "Essential rules" in
   AGENTS.md.
 files:
   - crates/openlogi-desktop/src/**/*.rs

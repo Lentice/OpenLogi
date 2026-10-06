@@ -6,7 +6,7 @@ severity: error
 message: Which launchd label the agent service carries is Profile::agent_service_label's call (xtask derives the Profile from its Channel); do not pick between AGENT_SERVICE_LABEL and its dev form here.
 note: |
   Packaging and the GUI's registration code once each matched dev against
-  production to choose the label. See "Single source of truth" in AGENTS.md.
+  production to choose the label. See "Essential rules" in AGENTS.md.
 files:
   - crates/**/*.rs
   - xtask/**/*.rs

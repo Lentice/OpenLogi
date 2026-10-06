@@ -8,7 +8,7 @@ severity: error
 message: The capture managers run on watchers::capture_manager::run; implement CaptureManager instead of deciding a ManagerCompletion in a second select loop here.
 note: |
   gesture::manage and keyboard::manage were the same 82-line select loop. See
-  "Single source of truth" in AGENTS.md.
+  "Essential rules" in AGENTS.md.
 files:
   - crates/openlogi-agent-core/src/watchers/gesture.rs
   - crates/openlogi-agent-core/src/watchers/gesture/**/*.rs

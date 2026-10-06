@@ -6,7 +6,7 @@ severity: error
 message: The modifier state of a key event or trigger is openlogi_core::config::KeyModifiers (openlogi-hook re-exports it); do not define another.
 note: |
   The hook crate once mirrored the four bools and the agent copied one struct
-  into the other field by field. See "Single source of truth" in AGENTS.md.
+  into the other field by field. See "Essential rules" in AGENTS.md.
 files:
   - crates/**/*.rs
   - xtask/**/*.rs

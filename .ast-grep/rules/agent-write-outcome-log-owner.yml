@@ -8,7 +8,7 @@ message: A background write logs its outcome through hardware::log_outcome; pass
 note: |
   Seven sites matched the same Result<Result<T, WriteError>, Elapsed> and had
   drifted: no failure arm logged the device index, and two timeout arms logged
-  the value but not the index. See "Single source of truth" in AGENTS.md.
+  the value but not the index. See "Essential rules" in AGENTS.md.
 files:
   - crates/openlogi-agent-core/**/*.rs
   - crates/openlogi-agent/**/*.rs

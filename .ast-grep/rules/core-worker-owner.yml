@@ -9,7 +9,7 @@ note: |
   Eleven sites once built the same current-thread runtime by hand — the two
   GPUI client loops, five agent watchers, three hardware writers, and the
   takeover probe. The agent's main multi-thread runtime is a different
-  decision and stays where it is. See "Single source of truth" in AGENTS.md.
+  decision and stays where it is. See "Essential rules" in AGENTS.md.
 files:
   - crates/**/*.rs
   - xtask/**/*.rs
