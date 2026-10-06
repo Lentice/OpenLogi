@@ -9,10 +9,207 @@ use super::cache::{CACHE_MISS_GRACE, CacheKey};
 use super::events::{HidppEventSource, observed_event_channel};
 use super::replay_test_support::{
     BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, bolt_fixture, connection_notification,
-    direct_fixture, malformed_dpi_fixture, short,
+    direct_battery_fixture, direct_fixture, malformed_dpi_fixture, short,
 };
 use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend, ReplayTopology};
 use crate::{ChannelRegistry, get_dpi};
+
+#[tokio::test]
+async fn immutable_probe_is_not_repeated_after_arbitrary_elapsed_time() {
+    let fixture = direct_fixture(OpenOutcome::Hidpp, 1);
+    let info = fixture.node.info.clone();
+    let expected = fixture.inventory;
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid direct replay"),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    assert_eq!(
+        enumerator.enumerate().await.unwrap(),
+        vec![expected.clone()]
+    );
+    let before = backend.channel_completion(DIRECT_CHANNEL).unwrap();
+    let channel = Arc::clone(&enumerator.channels.get(&info.id).unwrap().channel);
+    let mut timeouts = enumerator.timeouts;
+    timeouts.direct = Duration::from_millis(100);
+    let result = super::probe::probe_one(
+        info,
+        channel,
+        super::probe::PassContext {
+            cache: &enumerator.cache,
+            now: std::time::Instant::now() + Duration::from_hours(8760),
+            subscriptions: None,
+            timeouts: &timeouts,
+        },
+    )
+    .await;
+    assert_eq!(result.inventory, Some(expected));
+    assert_eq!(
+        backend.channel_completion(DIRECT_CHANNEL).unwrap(),
+        before,
+        "elapsed time must not send another model or feature-table request"
+    );
+}
+
+#[tokio::test]
+async fn elapsed_cache_hits_refresh_only_the_volatile_battery() {
+    let fixture = direct_battery_fixture(&[55, 76]);
+    let info = fixture.node.info.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    let initial = enumerator.enumerate().await.unwrap();
+    assert_eq!(
+        initial[0].paired[0].battery.as_ref().unwrap().percentage,
+        55
+    );
+    let before = backend
+        .channel_completion(DIRECT_CHANNEL)
+        .unwrap()
+        .written_reports
+        .len();
+    let channel = Arc::clone(&enumerator.channels.get(&info.id).unwrap().channel);
+    let probe = super::probe::probe_one(
+        info,
+        channel,
+        super::probe::PassContext {
+            cache: &enumerator.cache,
+            now: std::time::Instant::now() + Duration::from_hours(8760),
+            subscriptions: None,
+            timeouts: &enumerator.timeouts,
+        },
+    )
+    .await;
+    assert_eq!(
+        probe.inventory.unwrap().paired[0]
+            .battery
+            .as_ref()
+            .unwrap()
+            .percentage,
+        76
+    );
+    let completion = backend.channel_completion(DIRECT_CHANNEL).unwrap();
+    assert_eq!(completion.written_reports.len(), before + 1);
+    assert_eq!(&completion.written_reports[before][..3], &[0x10, 0xff, 3]);
+    completion.require_complete().unwrap();
+}
+
+#[tokio::test]
+async fn rejected_battery_index_retries_the_complete_probe_then_stops() {
+    let mut fixture = direct_battery_fixture(&[55]);
+    let first_walk = fixture.cassette.exchanges.clone();
+    fixture
+        .cassette
+        .exchanges
+        .push(openlogi_fixture::CassetteExchange {
+            request_match: RequestMatch::Hidpp20,
+            request: short(0xff, 3, 0x10, [0, 0, 0]),
+            response: Some(vec![0x10, 0xff, 0xff, 3, 0x10, 6, 0]),
+            required: true,
+        });
+    fixture.cassette.exchanges.extend(first_walk.clone());
+    fixture
+        .cassette
+        .exchanges
+        .push(first_walk.last().unwrap().clone());
+    let key = CacheKey::Direct(fixture.node_id.clone());
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    let initial = enumerator.enumerate().await.unwrap();
+    assert_eq!(
+        enumerator.enumerate().await.unwrap(),
+        initial,
+        "a rejected index keeps last-good data"
+    );
+    assert!(enumerator.cache[&key].probed_at.is_none());
+    assert_eq!(
+        enumerator.enumerate().await.unwrap(),
+        initial,
+        "the following pass repairs the walk"
+    );
+    assert!(enumerator.cache[&key].probed_at.is_some());
+    let repaired = backend
+        .channel_completion(DIRECT_CHANNEL)
+        .unwrap()
+        .written_reports
+        .len();
+    assert_eq!(enumerator.enumerate().await.unwrap(), initial);
+    let completion = backend.channel_completion(DIRECT_CHANNEL).unwrap();
+    assert_eq!(
+        completion.written_reports.len(),
+        repaired + 1,
+        "repair returns to battery-only refresh"
+    );
+    completion.require_complete().unwrap();
+}
+
+#[tokio::test]
+async fn direct_node_reappearing_inside_cache_grace_is_probed_as_a_new_lifetime() {
+    let fixture = direct_fixture(OpenOutcome::Hidpp, 2);
+    let id = fixture.node_id.clone();
+    let expected = fixture.inventory;
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    assert_eq!(
+        enumerator.enumerate().await.unwrap(),
+        vec![expected.clone()]
+    );
+    backend
+        .set_node_presence(&id, NodePresence::Absent)
+        .unwrap();
+    backend
+        .set_channel_connection(DIRECT_CHANNEL, ChannelConnection::Disconnected)
+        .unwrap();
+    assert!(enumerator.enumerate().await.unwrap().is_empty());
+    assert!(!enumerator.cache.contains_key(&CacheKey::Direct(id.clone())));
+    backend
+        .set_node_presence(&id, NodePresence::Present)
+        .unwrap();
+    backend
+        .set_channel_connection(DIRECT_CHANNEL, ChannelConnection::Connected)
+        .unwrap();
+    assert_eq!(enumerator.enumerate().await.unwrap(), vec![expected]);
+    let completion = backend.channel_completion(DIRECT_CHANNEL).unwrap();
+    assert_eq!(completion.channel_open_count, 2);
+    assert_eq!(
+        completion.written_reports.len(),
+        10,
+        "each node lifetime receives its own complete walk"
+    );
+    completion.require_complete().unwrap();
+}
 
 #[tokio::test]
 async fn receiver_slots_interleave_on_one_channel_and_lifecycle_events_coalesce() {
@@ -307,8 +504,8 @@ async fn vanished_direct_node_ages_out_independently_of_a_sleeping_receiver_slot
             .expect("sleeping receiver remains enumerable");
         assert_eq!(inventory, std::slice::from_ref(&sleeping_inventory));
         assert!(
-            enumerator.cache.contains_key(&direct_key),
-            "direct cache retired inside grace on miss {miss}"
+            !enumerator.cache.contains_key(&direct_key),
+            "a disconnected node's identity must not survive for a replacement on miss {miss}"
         );
     }
     let after_grace = enumerator.enumerate().await.expect("cache grace advances");

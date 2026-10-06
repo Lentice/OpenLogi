@@ -417,6 +417,7 @@ impl Enumerator {
             }
             match backend.open_hidpp(&info).await {
                 Ok(Some(channel)) => {
+                    self.invalidate_node_cache(&node);
                     // A channel that actually opened must not inherit probe or
                     // arrival-replay eviction counts from its predecessor.
                     // Inventory replay remains bounded until a probe produces
@@ -463,6 +464,15 @@ impl Enumerator {
             Arc::strong_count(&cached.channel) == 1
         });
         self.ledger.retain_nodes(&seen_nodes);
+        let absent: Vec<_> = self
+            .node_cache_keys
+            .keys()
+            .filter(|node| !seen_nodes.contains(*node))
+            .cloned()
+            .collect();
+        for node in absent {
+            self.invalidate_node_cache(&node);
+        }
         self.node_cache_keys
             .retain(|node, _| seen_nodes.contains(node));
 
@@ -489,10 +499,29 @@ impl Enumerator {
         }
     }
 
+    /// Cache entries borrow the channel lifetime that validated their indexes.
+    /// Slot/node identities cannot identify a replacement unit, so discard
+    /// those entries. Bolt's own unit ID safely retains last-good metadata
+    /// while requiring a successful probe on its next online appearance.
+    fn invalidate_node_cache(&mut self, node: &NodeId) {
+        if let Some(keys) = self.node_cache_keys.get(node) {
+            for key in keys {
+                if persist::is_persistable(key) {
+                    if let Some(entry) = self.cache.get_mut(key) {
+                        entry.probed_at = None;
+                    }
+                } else {
+                    self.cache.remove(key);
+                    self.misses.remove(key);
+                }
+            }
+        }
+    }
+
     /// One enumeration pass, reusing the cache from prior passes. Probes every
     /// HID candidate concurrently (so one asleep node that burns the whole
     /// `PROBE_TIMEOUT` can't stall the others), reusing each device's cached
-    /// immutable data when it's present and fresh.
+    /// immutable data when it has been validated for this channel lifetime.
     ///
     /// A node the OS still lists but whose probe fails (receiver registers
     /// unanswered, probe timeout, open failure) is **not** reported as absent:
@@ -654,6 +683,11 @@ impl Enumerator {
                 CacheOutcome::Seen(key) => {
                     seen_keys.insert(key);
                 }
+                CacheOutcome::Forget(key) => {
+                    self.cache.remove(&key);
+                    self.misses.remove(&key);
+                    seen_keys.insert(key);
+                }
                 CacheOutcome::Unkeyed => {}
             }
         }
@@ -696,7 +730,28 @@ impl Enumerator {
         if !probe.verdict.is_healthy() && !self.node_cache_keys.contains_key(node) {
             return;
         }
-        let keys = probe.outcomes.iter().filter_map(CacheOutcome::key).cloned();
+        let keys: HashSet<_> = probe
+            .outcomes
+            .iter()
+            .filter_map(CacheOutcome::key)
+            .cloned()
+            .collect();
+        if probe.verdict.is_complete()
+            && let Some(previous) = self.node_cache_keys.get_mut(node)
+        {
+            // A complete receiver snapshot ending a slot's pairing lifetime
+            // is stronger than a missing arrival in a partial snapshot. Do not
+            // let cache grace lend that slot's identity to its next occupant.
+            previous.retain(|key| {
+                if matches!(key, CacheKey::UnifyingSlot { .. }) && !keys.contains(key) {
+                    self.cache.remove(key);
+                    self.misses.remove(key);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         self.node_cache_keys
             .entry(node.clone())
             .or_default()

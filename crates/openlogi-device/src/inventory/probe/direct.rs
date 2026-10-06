@@ -42,10 +42,13 @@ pub(super) async fn probe_direct(
     info: &NodeInfo,
     pass: PassContext<'_>,
 ) -> NodeProbe {
+    if !channel.is_connected() {
+        return NodeProbe::failed();
+    }
     let id = CacheKey::Direct(info.id.clone());
     let cached = pass.cache.get(&id);
     // A direct device is always "present" (its HID node is the candidate), so
-    // treat it as online: reuse the cached probe while fresh, otherwise probe.
+    // treat it as online: reuse validated metadata, otherwise probe.
     let (probe, outcome) = probe_or_reuse(
         &channel,
         DIRECT_DEVICE_INDEX,

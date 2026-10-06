@@ -20,6 +20,7 @@ fn cache_dirty_tracks_only_persistable_keys() {
     let unifying = CacheKey::UnifyingSlot {
         receiver_uid: "DA2699E1".into(),
         slot: 1,
+        wpid: 0x4069,
     };
     e.apply_outcomes(vec![CacheOutcome::Fresh(unifying.clone(), cache_entry())]);
     assert!(
@@ -89,40 +90,38 @@ fn being_seen_resets_the_miss_counter() {
 }
 
 #[test]
-fn cached_probe_is_reused_until_refresh_interval() {
+fn cached_probe_requires_lifecycle_invalidation_not_elapsed_time() {
     let probed_at = Instant::now();
-    let cached = Cached {
+    let mut cached = Cached {
         probe: ProbedFeatures::default(),
         battery: None,
         events: EventFeatureIndices::default(),
-        probed_at,
+        probed_at: Some(probed_at),
     };
-    assert!(!is_stale(&cached, probed_at), "same instant is fresh");
+    assert!(!needs_probe(&cached), "validated metadata is reusable");
+    cached.probed_at = None;
     assert!(
-        !is_stale(&cached, probed_at + Duration::from_secs(29)),
-        "just under the window is still fresh"
-    );
-    assert!(
-        is_stale(&cached, probed_at + REFRESH_INTERVAL),
-        "at the window the probe is refreshed"
+        needs_probe(&cached),
+        "explicit invalidation requires repair"
     );
 }
 
 #[test]
 fn unifying_cache_hits_use_only_the_battery_refresh_budget() {
-    let cached = cache_entry();
+    let mut cached = cache_entry();
     let timeouts = &ProbeTimeouts::DEFAULT;
     assert_eq!(
-        unifying_probe_budget(Some(&cached), cached.probed_at, timeouts),
+        unifying_probe_budget(Some(&cached), timeouts),
         UNIFYING_CACHED_SLOT_PROBE_TIMEOUT
     );
+    cached.probed_at = None;
     assert_eq!(
-        unifying_probe_budget(Some(&cached), cached.probed_at + REFRESH_INTERVAL, timeouts),
+        unifying_probe_budget(Some(&cached), timeouts),
         UNIFYING_SLOT_PROBE_TIMEOUT,
         "stale entries still get enough time for a full feature walk"
     );
     assert_eq!(
-        unifying_probe_budget(None, Instant::now(), timeouts),
+        unifying_probe_budget(None, timeouts),
         UNIFYING_SLOT_PROBE_TIMEOUT,
         "first sight still gets the full feature-walk budget"
     );

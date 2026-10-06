@@ -36,11 +36,19 @@ use super::mappings::{
 pub(super) struct ProbedFeatures {
     pub(super) battery: Option<BatteryInfo>,
     pub(super) model_info: Option<DeviceModelInfo>,
+    /// Runtime index used only to verify a slot's own unit ID before lending
+    /// it cached metadata. This avoids a feature-table walk for identity checks.
+    #[serde(default)]
+    pub(super) identity_feature: Option<u8>,
     /// Marketing type from HID++ `0x0005` — an identity hint only.
     pub(super) kind: Option<DeviceKind>,
     /// Marketing name from HID++ `0x0005`; preferred over generic OS HID names
     /// such as Windows Bluetooth's plain `"Mouse"`.
     pub(super) marketing_name: Option<String>,
+    /// An exposed marketing-name/type feature failed to answer. An absent
+    /// feature or a successfully read empty name does not require repair.
+    #[serde(default)]
+    pub(super) marketing_incomplete: bool,
     /// Configuration capabilities derived from the device's feature table.
     ///
     /// Invariant: `capabilities_incomplete` implies this is `Some`. The sole
@@ -58,7 +66,7 @@ pub(super) struct ProbedFeatures {
     pub(super) identity_incomplete: bool,
     /// A capability read *failed* (vs. the device not having the capability),
     /// so `capabilities` above understates what the device can do. Memoizing
-    /// that would hide a panel in the GUI for `REFRESH_INTERVAL`.
+    /// that would hide a panel in the GUI indefinitely.
     pub(super) capabilities_incomplete: bool,
 }
 
@@ -77,32 +85,28 @@ pub(super) enum BatteryProbe {
 /// Read just the battery by addressing its feature at the known runtime index —
 /// one round-trip, with no `Device::new` ping and no feature-table walk. This is
 /// both the full probe's battery read (the walk just produced the index) and the
-/// cheap per-reconciliation refresh for cache hits. `None` when the device
-/// doesn't answer (asleep, switched hosts).
+/// cheap per-reconciliation refresh for cache hits. Preserve protocol errors
+/// so the cache can repair rejected feature indexes without invalidating a
+/// sleeping device's immutable metadata.
 pub(super) async fn read_battery(
     channel: &Arc<HidppChannel>,
     slot: u8,
     probe: BatteryProbe,
-) -> Option<BatteryInfo> {
+) -> Result<BatteryInfo, hidpp::protocol::v20::Hidpp20Error> {
     match probe {
         BatteryProbe::Unified(feature_index) => {
             let feature = UnifiedBatteryFeature::new(Arc::clone(channel), slot, feature_index);
-            feature
-                .get_battery_info()
-                .await
-                .ok()
-                .map(|info| BatteryInfo {
-                    percentage: info.charging_percentage,
-                    level: map_battery_level(info.level),
-                    status: map_battery_status(info.status),
-                })
+            feature.get_battery_info().await.map(|info| BatteryInfo {
+                percentage: info.charging_percentage,
+                level: map_battery_level(info.level),
+                status: map_battery_status(info.status),
+            })
         }
         BatteryProbe::Legacy(feature_index) => {
             let feature = BatteryStatusFeature::new(Arc::clone(channel), slot, feature_index);
             feature
                 .get_battery_level_status()
                 .await
-                .ok()
                 .map(|info| BatteryInfo {
                     percentage: info.discharge_level,
                     level: legacy_battery_level_from_percentage(info.discharge_level),
@@ -111,7 +115,7 @@ pub(super) async fn read_battery(
         }
         BatteryProbe::Voltage(feature_index) => {
             let feature = BatteryVoltageFeature::new(Arc::clone(channel), slot, feature_index);
-            feature.get_battery_info().await.ok().map(|info| {
+            feature.get_battery_info().await.map(|info| {
                 let percentage = voltage_battery_percentage(info.voltage_mv);
                 BatteryInfo {
                     percentage,
@@ -162,15 +166,16 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
 async fn read_marketing_identity(
     device: &Device,
     slot: u8,
-) -> (Option<DeviceKind>, Option<String>) {
+) -> (Option<DeviceKind>, Option<String>, bool) {
     let Some(feature) = device.get_feature::<DeviceTypeAndNameFeature>() else {
-        return (None, None);
+        return (None, None, false);
     };
-
+    let mut incomplete = false;
     let kind = match feature.get_device_type().await {
         Ok(ty) => Some(map_device_type(ty)),
         Err(e) => {
             debug!(slot, error = ?e, "DeviceType read failed");
+            incomplete = true;
             None
         }
     };
@@ -179,10 +184,11 @@ async fn read_marketing_identity(
         Ok(_) => None,
         Err(e) => {
             debug!(slot, error = ?e, "DeviceName read failed");
+            incomplete = true;
             None
         }
     };
-    (kind, name)
+    (kind, name, incomplete)
 }
 
 /// Open a HID++ session for `slot` and read everything we care about (battery,
@@ -215,12 +221,17 @@ pub(super) async fn probe_features(
     // The enumeration response IS the device's feature-ID table — capture it
     // for capability derivation instead of discarding it.
     let mut battery_probe = None;
+    let mut identity_feature = None;
     let mut event_features = EventFeatureIndices::default();
     let mut probe_haptic_controls = false;
     let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
             battery_probe = battery_feature_index(ids.iter().copied());
+            identity_feature = ids
+                .iter()
+                .position(|id| *id == DeviceInformationFeature::ID)
+                .and_then(|offset| u8::try_from(offset + 1).ok());
             event_features = EventFeatureIndices::from_feature_ids(&ids);
             if let Some(subscriptions) = subscriptions {
                 // Register immediately after the table read, before the
@@ -248,10 +259,84 @@ pub(super) async fn probe_features(
     }
 
     let battery = match battery_probe {
-        Some(probe) => read_battery(channel, slot, probe).await,
+        Some(probe) => read_battery(channel, slot, probe).await.ok(),
         None => None,
     };
 
+    let (model_info, identity_incomplete) = read_model_identity(&device, slot).await;
+
+    // `0x0005` reports the device's own marketing type and name. The type is
+    // the authoritative kind signal; the marketing name matters especially on
+    // Windows Bluetooth, where the OS HID collection is often just `"Mouse"`.
+    let (kind, marketing_name, marketing_incomplete) = read_marketing_identity(&device, slot).await;
+
+    (
+        ProbedFeatures {
+            battery,
+            model_info,
+            identity_feature,
+            kind,
+            marketing_name,
+            marketing_incomplete,
+            capabilities,
+            identity_incomplete,
+            capabilities_incomplete,
+        },
+        battery_probe,
+        event_features,
+    )
+}
+
+/// Fill in the capabilities the feature table alone can't answer, each of which
+/// costs its own round-trips.
+///
+/// `Err(())` means a read failed, so the set now understates the device — the
+/// caller must not let that be memoized. A capability whose read merely says
+/// "no" is not an error: only an unanswered read is.
+async fn probe_extra_capabilities(
+    device: &Device,
+    caps: &mut Capabilities,
+    probe_haptic_controls: bool,
+) -> Result<(), ()> {
+    if let Some(feature) = device.get_feature::<HiResWheelFeature>() {
+        caps.scroll_inversion = feature
+            .get_wheel_capabilities()
+            .await
+            .map_err(|_| ())?
+            .has_invert;
+    }
+    // Older MX mice (notably MX Master 2S) expose the horizontal wheel as
+    // Gestures2 gesture id 46 instead of the newer dedicated 0x2150
+    // Thumbwheel feature. Inspect the descriptor table so a generic 0x6501
+    // touch device does not become a false-positive thumbwheel device.
+    if !caps.thumbwheel
+        && let Some(feature) = device.get_feature::<Gestures2Feature>()
+    {
+        caps.thumbwheel = feature.has_thumbwheel().await.map_err(|_| ())?;
+    }
+    if let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
+        let count = feature.get_count().await.map_err(|_| ())?;
+        let mut haptic_panel = false;
+        let mut dpi_gestures = false;
+        for index in 0..count {
+            let info = feature.get_cid_info(index).await.map_err(|_| ())?;
+            haptic_panel |= probe_haptic_controls
+                && info.cid == control_ids::HAPTIC_PANEL
+                && info.flags.is_divertable();
+            dpi_gestures |= DPI_MODE_SHIFT_CIDS.contains(&info.cid.0)
+                && info.flags.is_divertable()
+                && info.flags.supports_raw_xy();
+        }
+        // Publish only a complete control walk. A lost reply must retain the
+        // cache's last-good capabilities and schedule repair, not hide support.
+        caps.haptic_panel = haptic_panel;
+        caps.dpi_gestures = dpi_gestures;
+    }
+    Ok(())
+}
+
+/// Read the device-owned identity, retaining whether a supported query failed.
+async fn read_model_identity(device: &Device, slot: u8) -> (Option<DeviceModelInfo>, bool) {
     let mut identity_incomplete = false;
     let model_info = match device.get_feature::<DeviceInformationFeature>() {
         Some(feature) => match feature.get_device_info().await {
@@ -291,71 +376,7 @@ pub(super) async fn probe_features(
         None => None,
     };
 
-    // `0x0005` reports the device's own marketing type and name. The type is
-    // the authoritative kind signal; the marketing name matters especially on
-    // Windows Bluetooth, where the OS HID collection is often just `"Mouse"`.
-    let (kind, marketing_name) = read_marketing_identity(&device, slot).await;
-
-    (
-        ProbedFeatures {
-            battery,
-            model_info,
-            kind,
-            marketing_name,
-            capabilities,
-            identity_incomplete,
-            capabilities_incomplete,
-        },
-        battery_probe,
-        event_features,
-    )
-}
-
-/// Fill in the capabilities the feature table alone can't answer, each of which
-/// costs its own round-trips.
-///
-/// `Err(())` means a read failed, so the set now understates the device — the
-/// caller must not let that be memoized. A capability whose read merely says
-/// "no" is not an error: only an unanswered read is.
-async fn probe_extra_capabilities(
-    device: &Device,
-    caps: &mut Capabilities,
-    probe_haptic_controls: bool,
-) -> Result<(), ()> {
-    if let Some(feature) = device.get_feature::<HiResWheelFeature>() {
-        caps.scroll_inversion = feature
-            .get_wheel_capabilities()
-            .await
-            .is_ok_and(|wheel| wheel.has_invert);
-    }
-    // Older MX mice (notably MX Master 2S) expose the horizontal wheel as
-    // Gestures2 gesture id 46 instead of the newer dedicated 0x2150
-    // Thumbwheel feature. Inspect the descriptor table so a generic 0x6501
-    // touch device does not become a false-positive thumbwheel device.
-    if !caps.thumbwheel
-        && let Some(feature) = device.get_feature::<Gestures2Feature>()
-    {
-        caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
-    }
-    if let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
-        let count = feature.get_count().await.map_err(|_| ())?;
-        let mut haptic_panel = false;
-        let mut dpi_gestures = false;
-        for index in 0..count {
-            let info = feature.get_cid_info(index).await.map_err(|_| ())?;
-            haptic_panel |= probe_haptic_controls
-                && info.cid == control_ids::HAPTIC_PANEL
-                && info.flags.is_divertable();
-            dpi_gestures |= DPI_MODE_SHIFT_CIDS.contains(&info.cid.0)
-                && info.flags.is_divertable()
-                && info.flags.supports_raw_xy();
-        }
-        // Publish only a complete control walk. A lost reply must retain the
-        // cache's last-good capabilities and schedule repair, not hide support.
-        caps.haptic_panel = haptic_panel;
-        caps.dpi_gestures = dpi_gestures;
-    }
-    Ok(())
+    (model_info, identity_incomplete)
 }
 
 #[cfg(test)]

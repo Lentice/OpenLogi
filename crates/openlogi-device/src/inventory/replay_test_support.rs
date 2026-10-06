@@ -93,6 +93,25 @@ fn direct_probe_exchanges() -> Vec<CassetteExchange> {
     ]
 }
 
+pub(super) fn direct_battery_fixture(readings: &[u8]) -> DirectFixture {
+    let mut fixture = direct_fixture(OpenOutcome::Hidpp, 0);
+    let mut exchanges = direct_probe_exchanges();
+    // FeatureSet count now includes unified battery at runtime index 3.
+    exchanges[2].response = Some(short(0xff, 1, 0, [3, 0, 0]));
+    exchanges.push(h20(
+        short(0xff, 1, 0x10, [3, 0, 0]),
+        short(0xff, 1, 0x10, [0x10, 0x04, 0]),
+    ));
+    for percentage in readings {
+        exchanges.push(h20(
+            short(0xff, 3, 0x10, [0, 0, 0]),
+            short(0xff, 3, 0x10, [*percentage, 2, 0]),
+        ));
+    }
+    fixture.cassette.exchanges = exchanges;
+    fixture
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct BoltSlot {
     pub(super) slot: u8,

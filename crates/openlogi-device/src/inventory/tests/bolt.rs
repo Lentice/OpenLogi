@@ -143,9 +143,7 @@ fn stale_silent_slot_cache() -> (CacheKey, HashMap<CacheKey, Cached>) {
     };
     let mut entry = cache_entry();
     entry.probe = probed(Some(model(SILENT_SLOT_UNIT_ID, Some("SN-1"))), false);
-    entry.probed_at = Instant::now()
-        .checked_sub(REFRESH_INTERVAL)
-        .expect("the process has been up longer than the refresh interval's worth of ticks");
+    entry.probed_at = None;
     let cache = HashMap::from([(key.clone(), entry)]);
     (key, cache)
 }

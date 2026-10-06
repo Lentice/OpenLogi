@@ -9,20 +9,19 @@
 //!
 //! Only Bolt identities are persisted, because only they are keyed on the
 //! device's *own* identity (the pairing-register unit id), which no re-pairing
-//! can silently reassign. A `CacheKey::UnifyingSlot` is `receiver + slot`: a
+//! can silently reassign. A `CacheKey::UnifyingSlot` includes receiver, slot
+//! and model WPID, but not the unit's own identity: a
 //! different device paired into that slot while the agent is down would
 //! inherit the previous occupant's probe on warm start. A `CacheKey::Direct`
 //! is an OS-runtime node id with no cross-boot stability. Loaded entries
-//! restart the elapsed refresh window, so the regular self-healing pass
-//! re-walks them on schedule; until (and unless) that walk succeeds, the
-//! persisted data serves exactly like an in-memory cache hit.
+//! retain last-good metadata for sleeping devices, and require a successful
+//! live probe before trusting their feature indexes in this process.
 //!
 //! *Where* a snapshot is kept is the host's business, not this module's: the
 //! enumerator writes through a [`ProbeCacheStore`]; `openlogi-hid` supplies
 //! the file-backed one every native build uses.
 
 use std::collections::HashMap;
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -183,11 +182,9 @@ impl ProbeCacheSnapshot {
                         probe: entry.probe,
                         battery: entry.battery,
                         events: entry.events,
-                        // Restart the refresh clock: the entry serves
-                        // immediately as a cache hit, and the periodic
-                        // self-healing re-walk decides when it is due for a
-                        // fresh read.
-                        probed_at: Instant::now(),
+                        // Persisted indexes have not been validated against
+                        // this channel/firmware lifetime yet.
+                        probed_at: None,
                     },
                 )
             })
@@ -243,24 +240,24 @@ mod tests {
                     wireless_status: Some(7),
                     unified_battery: Some(9),
                 },
-                probed_at: Instant::now(),
+                probed_at: Some(Instant::now()),
             },
         );
         cache.insert(
             CacheKey::UnifyingSlot {
                 receiver_uid: "DA2699E1".into(),
                 slot: 2,
+                wpid: 0x4069,
             },
             Cached {
                 probe: ProbedFeatures::default(),
                 battery: None,
                 events: EventFeatureIndices::default(),
-                probed_at: Instant::now(),
+                probed_at: Some(Instant::now()),
             },
         );
 
         let snapshot = ProbeCacheSnapshot::of(&cache);
-        let restored_after = Instant::now();
         let restored = snapshot.into_entries();
 
         let bolt = restored
@@ -287,13 +284,14 @@ mod tests {
             "the battery *reading* is volatile — restoring it would resurrect a stale value"
         );
         assert!(
-            bolt.probed_at >= restored_after,
-            "a restored entry restarts the refresh clock"
+            bolt.probed_at.is_none(),
+            "a restored entry requires live validation before reusing indexes"
         );
         assert!(
             !restored.contains_key(&CacheKey::UnifyingSlot {
                 receiver_uid: "DA2699E1".into(),
                 slot: 2,
+                wpid: 0x4069,
             }),
             "unifying entries are slot-keyed, so a re-pair while the agent is \
              down could hand them to a different device — never persisted"

@@ -10,8 +10,8 @@ use openlogi_core::device::{
 };
 
 use super::cache::{
-    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_INTERVAL, backfill_identity,
-    is_stale, keep_known_capabilities,
+    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, backfill_identity, keep_known_capabilities,
+    needs_probe,
 };
 use super::events::EventFeatureIndices;
 use super::features::ProbedFeatures;
@@ -46,7 +46,7 @@ fn cache_entry() -> Cached {
         probe: ProbedFeatures::default(),
         battery: None,
         events: EventFeatureIndices::default(),
-        probed_at: Instant::now(),
+        probed_at: Some(Instant::now()),
     }
 }
 

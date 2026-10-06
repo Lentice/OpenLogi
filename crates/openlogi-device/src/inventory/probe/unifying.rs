@@ -2,17 +2,13 @@
 //! list, so the register phase is held across the slot walks and a receiver that
 //! answers its pairing count but not the arrival trigger is alive, not failed.
 
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    future::Future,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, fmt::Debug, future::Future, sync::Arc, time::Duration};
 
 use futures_concurrency::future::Join as _;
 use hidpp::{
     channel::HidppChannel,
+    feature::{CreatableFeature, device_information::DeviceInformationFeature},
+    protocol::v20::{ErrorType, Hidpp20Error},
     receiver::unifying::{
         DeviceConnection as UnifyingDeviceConnection, Event as UnifyingEvent,
         Receiver as UnifyingReceiver,
@@ -28,7 +24,7 @@ use super::{
 };
 use crate::backend::NodeInfo;
 use crate::host_lock::ReceiverRegisterPhase;
-use crate::inventory::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse};
+use crate::inventory::cache::{CacheKey, CacheOutcome, Cached, needs_probe, probe_or_reuse};
 use crate::inventory::events::EventSubscriptionHandle;
 use crate::inventory::features::ProbedFeatures;
 use crate::inventory::mappings::{map_unifying_kind, resolve_device_kind};
@@ -121,11 +117,10 @@ pub(super) async fn probe_unifying_receiver(
     let receiver_uid = if let Some(uid) = unique_id.as_deref() {
         uid
     } else {
-        // UID fetch failed — use the product ID as a weaker discriminant so
-        // two receivers with the same PID still collide, but a receiver and a
-        // direct device never share a cache entry.
-        tracing::warn!("Unifying receiver UID unavailable; cache isolation may be degraded");
-        receiver_uid_fallback = format!("pid:{:04x}", info.product_id);
+        // A failed serial read must not merge two receivers of the same model.
+        // Node identity isolates the cache for this channel lifetime.
+        tracing::warn!("Unifying receiver UID unavailable; using node-scoped cache");
+        receiver_uid_fallback = format!("node:{}", info.id);
         &receiver_uid_fallback
     };
     let slot_results = connections
@@ -295,14 +290,30 @@ where
     }
 }
 
+/// Build a single identity query only when the cached unit can be compared.
+fn cached_unit_query(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    cached: &Cached,
+) -> Option<(DeviceInformationFeature, [u8; 4])> {
+    let index = cached.probe.identity_feature?;
+    let unit = cached.probe.model_info.as_ref()?.unit_id;
+    (unit != [0; 4]).then(|| {
+        (
+            DeviceInformationFeature::new(Arc::clone(channel), slot, index),
+            unit,
+        )
+    })
+}
+
 /// Probe a Unifying slot from a live device-connection event.
 ///
 /// Device-arrival events carry the slot index, kind, wpid, and online status —
 /// enough to surface an entry for every currently-connected device. The
 /// unit_id (needed for stable caching across ticks) is not available without a
 /// working `get_device_pairing_information` call; we derive a stable cache key
-/// from the receiver UID + slot so the feature-table walk is amortised at ~30s
-/// and two receivers sharing a slot number don't collide in the cache.
+/// from the receiver UID + slot + arrival WPID. A slot reused by another model
+/// cannot inherit its predecessor's probe, even without an intervening scan.
 pub(in crate::inventory) async fn probe_unifying_slot(
     channel: &Arc<HidppChannel>,
     event: &UnifyingDeviceConnection,
@@ -315,8 +326,47 @@ pub(in crate::inventory) async fn probe_unifying_slot(
     let id = CacheKey::UnifyingSlot {
         receiver_uid: receiver_uid.to_string(),
         slot,
+        wpid: event.wpid,
     };
-    let cached = pass.cache.get(&id);
+    let previous = pass.cache.get(&id);
+    let invalidated;
+    let mut cached = previous;
+    let mut replaced = false;
+    if event.online
+        && let Some(entry) = previous
+        && let Some((feature, unit_id)) = cached_unit_query(channel, slot, entry)
+    {
+        // Arrival WPID identifies a model, not its unit. A receiver can reuse
+        // the same slot between scans without replacing its own USB channel.
+        // Verify only the own-unit ID through the memoized index; no ping,
+        // name, serial, capability reads or feature-table walk are needed.
+        match timeout(
+            pass.timeouts.unifying_cached_slot_probe,
+            feature.get_device_info(),
+        )
+        .await
+        {
+            Ok(Ok(info)) if info.unit_id != unit_id => {
+                cached = None;
+                replaced = true;
+                if let Some(subscriptions) = pass.subscriptions {
+                    subscriptions.register_device(
+                        slot,
+                        crate::inventory::events::EventFeatureIndices::default(),
+                    );
+                }
+            }
+            Ok(Err(Hidpp20Error::Feature(
+                ErrorType::InvalidFeatureIndex | ErrorType::InvalidFunctionId,
+            ))) => {
+                let mut repair = entry.clone();
+                repair.probed_at = None;
+                invalidated = repair;
+                cached = Some(&invalidated);
+            }
+            _ => {}
+        }
+    }
     let register_kind = map_unifying_kind(event.kind);
 
     // The 0x41 re-broadcast is the receiver's own slot report and its
@@ -326,7 +376,7 @@ pub(in crate::inventory) async fn probe_unifying_slot(
     // announced itself into "offline" — and don't probe an offline slot at
     // all, which would burn the budget on a link the receiver just reported
     // as not established.
-    let probe_budget = unifying_probe_budget(cached, pass.now, pass.timeouts);
+    let probe_budget = unifying_probe_budget(cached, pass.timeouts);
     let probe_result = timeout(
         probe_budget,
         probe_or_reuse(
@@ -340,7 +390,7 @@ pub(in crate::inventory) async fn probe_unifying_slot(
         ),
     )
     .await;
-    let (probe, outcome) = if let Ok(result) = probe_result {
+    let (probe, mut outcome) = if let Ok(result) = probe_result {
         result
     } else {
         debug!(slot, budget = ?probe_budget,
@@ -348,6 +398,13 @@ pub(in crate::inventory) async fn probe_unifying_slot(
         let probe = cached.map_or_else(ProbedFeatures::default, |entry| entry.probe.clone());
         (probe, CacheOutcome::Seen(id))
     };
+    if matches!(outcome, CacheOutcome::Seen(_)) {
+        if replaced {
+            outcome = CacheOutcome::Forget(outcome.key()?.clone());
+        } else if let Some(entry) = cached.filter(|entry| needs_probe(entry)) {
+            outcome = CacheOutcome::Update(outcome.key()?.clone(), entry.clone());
+        }
+    }
 
     // HID++ 2.0's marketing name is the same identity we need for display and
     // avoids another receiver-register round trip. Keep the legacy codename
@@ -381,14 +438,13 @@ pub(in crate::inventory) async fn probe_unifying_slot(
     Some((device, outcome))
 }
 
-/// A fresh cache hit needs only an optional battery refresh; first-sight and
-/// stale entries retain the larger budget needed for a complete feature walk.
+/// A validated cache hit needs only an optional battery refresh; first-sight
+/// and invalidated entries retain the budget for a complete feature walk.
 pub(in crate::inventory) fn unifying_probe_budget(
     cached: Option<&Cached>,
-    now: Instant,
     timeouts: &ProbeTimeouts,
 ) -> Duration {
-    if cached.is_some_and(|entry| !is_stale(entry, now)) {
+    if cached.is_some_and(|entry| !needs_probe(entry)) {
         timeouts.unifying_cached_slot_probe
     } else {
         timeouts.unifying_slot_probe
