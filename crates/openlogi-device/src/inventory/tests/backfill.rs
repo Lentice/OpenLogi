@@ -210,7 +210,7 @@ fn failed_device_info_read_backfills_from_cache() {
 #[test]
 fn failed_serial_read_backfills_only_the_serial() {
     let mut fresh = probed(Some(model([1, 2, 3, 4], None)), true);
-    let cached = probed(Some(model([9, 9, 9, 9], Some("abc123"))), false);
+    let cached = probed(Some(model([1, 2, 3, 4], Some("abc123"))), false);
 
     backfill_identity(&mut fresh, &cached);
 

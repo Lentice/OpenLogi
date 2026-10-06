@@ -3,6 +3,92 @@
 use super::*;
 
 #[tokio::test]
+async fn changed_unit_with_a_failed_serial_read_cannot_borrow_the_previous_identity() {
+    let fail_serial = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let responder_failure = Arc::clone(&fail_serial);
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        if request[2] == 99
+            || (request[2], request[3] >> 4) == (2, 2)
+                && responder_failure.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Some(crate::channel::scripted::feature_error(request, 6));
+        }
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(&request[..4]);
+        response[0] = 0x11;
+        match (request[2], request[3] >> 4) {
+            (0, 1) | (1, 0) => response[4] = 4,
+            (0, 0) => response[4] = 1,
+            (1, 1) => response[4..6].copy_from_slice(
+                &[0x0001_u16, 0x0003, 0x0005, 0x2201][usize::from(request[4]) - 1].to_be_bytes(),
+            ),
+            (2, 0) => {
+                response[4..9].copy_from_slice(&[1, 2, 2, 2, 2]);
+                response[18] = 1;
+            }
+            (2, 2) => response[4..14].copy_from_slice(b"NEW-SERIAL"),
+            (3, 2) => response[4] = 3,
+            (3, 0) => response[4] = 5,
+            (3, 1) => response[4..9].copy_from_slice(b"Unit2"),
+            _ => panic!("unexpected request {request:02x?}"),
+        }
+        Some(response)
+    });
+    let channel = scripted_channel(raw).await;
+    let event = online_slot_event();
+    let key = CacheKey::UnifyingSlot {
+        receiver_uid: "SERIAL".into(),
+        slot: 1,
+        wpid: 0x4069,
+    };
+    let mut entry = cache_entry();
+    entry.probe.model_info = Some(model([1; 4], Some("OLD-SERIAL")));
+    entry.probe.identity_feature = Some(99);
+    let mut enumerator = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
+    enumerator.cache.insert(key.clone(), entry);
+    for pass in 0..3 {
+        fail_serial.store(pass == 0, std::sync::atomic::Ordering::Relaxed);
+        let before = handle.written_reports().len();
+        let (device, outcome) = probe_unifying_slot(
+            &channel,
+            &event,
+            "SERIAL",
+            PassContext {
+                cache: &enumerator.cache,
+                now: Instant::now(),
+                subscriptions: None,
+                timeouts: &ProbeTimeouts::DEFAULT,
+            },
+        )
+        .await
+        .unwrap();
+        let info = device.model_info.unwrap();
+        assert_eq!(info.unit_id, [2; 4]);
+        if pass == 0 {
+            assert!(
+                info.serial_number.is_none(),
+                "a new unit cannot borrow the old serial"
+            );
+        } else {
+            assert_eq!(info.serial_number.as_deref(), Some("NEW-SERIAL"));
+        }
+        enumerator.apply_outcomes(vec![outcome]);
+        if pass == 0 {
+            assert!(
+                !enumerator.cache.contains_key(&key),
+                "the old unit must not survive a partial replacement probe"
+            );
+        } else if pass == 2 {
+            assert_eq!(
+                handle.written_reports().len(),
+                before + 1,
+                "a complete repair returns to a single identity check"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn rejected_identity_index_keeps_repair_pending_after_a_failed_probe() {
     let key = CacheKey::UnifyingSlot {
         receiver_uid: "SERIAL".into(),

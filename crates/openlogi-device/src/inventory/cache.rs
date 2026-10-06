@@ -146,6 +146,16 @@ pub(super) async fn probe_or_reuse(
     }
     if online && cached.is_none_or(needs_probe) {
         let (mut fresh, battery, events) = probe_features(channel, index, subscriptions).await;
+        let replacement = cached.is_some_and(|c| identity_changed(&fresh, &c.probe));
+        let cached = cached.filter(|_| !replacement);
+        let retry = || {
+            if replacement {
+                id.clone()
+                    .map_or(CacheOutcome::Unkeyed, CacheOutcome::Forget)
+            } else {
+                seen(id.clone())
+            }
+        };
         if let (Some(reading), Some(probe)) = (fresh.battery.take(), battery) {
             fresh.battery = Some(hold_percentage_while_charging(
                 reading,
@@ -168,13 +178,13 @@ pub(super) async fn probe_or_reuse(
                 if let Some(c) = cached {
                     keep_known_capabilities(&mut fresh, &c.probe);
                 }
-                return (fresh, seen(id));
+                return (fresh, retry());
             }
             // An unresolved identity/name query is served but not memoized:
             // caching it would pin a wrong config key or generic model name
             // indefinitely (#482). The next reconciliation re-probes instead.
             if fresh.identity_incomplete || fresh.marketing_incomplete {
-                return (fresh, seen(id));
+                return (fresh, retry());
             }
             return match id {
                 Some(key) => {
@@ -194,7 +204,7 @@ pub(super) async fn probe_or_reuse(
         // No battery re-read either — the device just proved unresponsive.
         return match cached {
             Some(c) => (c.probe.clone(), seen(id)),
-            None => (fresh, seen(id)),
+            None => (fresh, retry()),
         };
     }
     match cached {
@@ -254,6 +264,9 @@ pub(super) fn keep_known_capabilities(fresh: &mut ProbedFeatures, cached: &Probe
 /// device's config key (#482). A probe whose identity reads all succeeded is
 /// returned untouched.
 pub(super) fn backfill_identity(fresh: &mut ProbedFeatures, cached: &ProbedFeatures) {
+    if identity_changed(fresh, cached) {
+        return;
+    }
     if fresh.kind.is_none() {
         fresh.kind = cached.kind;
     }
@@ -269,12 +282,25 @@ pub(super) fn backfill_identity(fresh: &mut ProbedFeatures, cached: &ProbedFeatu
             fresh.identity_incomplete = false;
         }
         (Some(now), Some(previous))
-            if now.serial_number.is_none() && previous.serial_number.is_some() =>
+            if now.unit_id != [0; 4]
+                && now.unit_id == previous.unit_id
+                && now.serial_number.is_none()
+                && previous.serial_number.is_some() =>
         {
             now.serial_number.clone_from(&previous.serial_number);
             fresh.identity_incomplete = false;
         }
         _ => {}
+    }
+}
+
+/// Nonzero device-owned IDs prove that last-good data belongs to another unit.
+fn identity_changed(fresh: &ProbedFeatures, cached: &ProbedFeatures) -> bool {
+    match (&fresh.model_info, &cached.model_info) {
+        (Some(now), Some(previous)) => {
+            now.unit_id != [0; 4] && previous.unit_id != [0; 4] && now.unit_id != previous.unit_id
+        }
+        _ => false,
     }
 }
 
