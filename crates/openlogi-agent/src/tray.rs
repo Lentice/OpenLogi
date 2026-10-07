@@ -223,7 +223,6 @@ fn quit_agent() -> ! {
             .arg(DeeplinkCommand::Quit.to_url())
             .output();
     }
-    crate::overlay::evict_on_quit();
     info!("menu-bar Quit — requesting graceful agent shutdown");
     let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
     shutdown::request_tray_quit(requests.as_ref(), 0)

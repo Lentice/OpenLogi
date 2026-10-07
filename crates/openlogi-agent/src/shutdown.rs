@@ -81,6 +81,7 @@ pub(crate) fn request_tray_quit(
     }
     #[cfg(target_os = "macos")]
     crate::lifecycle::armed_session::clear();
+    crate::overlay::evict_on_quit();
     #[expect(
         clippy::exit,
         reason = "fallback only: a missing or unwound core cannot return a status through an AppKit or win32 tray callback"

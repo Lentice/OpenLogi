@@ -453,7 +453,6 @@ fn quit(hwnd: HWND) {
         nid.uID = 1;
         Shell_NotifyIconW(NIM_DELETE, &raw const nid);
     }
-    crate::overlay::evict_on_quit();
     info!("tray Quit — requesting graceful agent shutdown");
     let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
     shutdown::request_tray_quit(requests.as_ref(), 0);

@@ -1,6 +1,111 @@
 //! Inventory readiness and what every mutator republishes.
 
 use super::*;
+use std::collections::BTreeMap;
+
+#[test]
+fn action_ring_demand_tracks_usable_bindings_inventory_and_profiles() {
+    let inventory = direct_inventory(Some("ring-mouse"), [1, 2, 3, 4]);
+    let mut orch = orchestrator(Config::ephemeral());
+    let mut demand = orch.shared().action_ring_demand;
+    assert!(!*demand.borrow());
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    let key = orch.devices[0].config_key.clone();
+    let mut config = Config::ephemeral();
+    config.app_settings.mouse_profile_target = openlogi_core::config::MouseProfileTarget::Focused;
+    config.set_pointer_speed(&key, openlogi_core::hid::PointerSpeed::NORMAL);
+    orch.reload_config(config.clone());
+    assert!(
+        !*demand.borrow(),
+        "ordinary M720 settings cannot imply a haptic panel"
+    );
+    config.set_binding(
+        &key,
+        ButtonId::GestureButton,
+        Action::ShowActionsRing.into(),
+    );
+    orch.reload_config(config.clone());
+    assert!(*demand.borrow(), "a usable thumb trigger warms the overlay");
+    let _ = demand.borrow_and_update();
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert!(
+        !demand.has_changed().expect("projection open"),
+        "identical inventory must not wake the helper"
+    );
+    config.set_action_ring_enabled(&key, false);
+    orch.reload_config(config.clone());
+    assert!(!*demand.borrow(), "a trigger cannot bypass the ring switch");
+    config.set_action_ring_enabled(&key, true);
+    config.set_per_app_binding(&key, "editor", ButtonId::GestureButton, Some(Action::Copy));
+    orch.reload_config(config.clone());
+    assert!(*demand.borrow());
+    orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
+    assert!(
+        !*demand.borrow(),
+        "foreground override changes usable demand"
+    );
+    orch.set_current_app(None);
+    assert!(*demand.borrow());
+    orch.refresh_inventory(&[], &[], false);
+    assert!(!*demand.borrow(), "no device means no configured demand");
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert!(*demand.borrow(), "reconnect restores demand");
+}
+
+#[test]
+fn action_ring_demand_includes_haptic_defaults_long_press_gestures_and_keyboard() {
+    let mut inventory = direct_inventory(Some("ring-mouse"), [1, 2, 3, 4]);
+    let mut orch = orchestrator(Config::ephemeral());
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    let key = orch.devices[0].config_key.clone();
+    let demand = orch.shared().action_ring_demand;
+    assert!(!*demand.borrow());
+    inventory.paired[0]
+        .capabilities
+        .as_mut()
+        .expect("capabilities")
+        .haptic_feedback = true;
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert!(
+        *demand.borrow(),
+        "haptic panel default can warm without saved config"
+    );
+    inventory.paired[0]
+        .capabilities
+        .as_mut()
+        .expect("capabilities")
+        .haptic_feedback = false;
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert!(!*demand.borrow());
+    let mut config = Config::ephemeral();
+    config.set_binding(
+        &key,
+        ButtonId::GestureButton,
+        Binding::LongPress(openlogi_core::binding::LongPressBinding::new(
+            Action::Copy,
+            Action::ShowActionsRing,
+        )),
+    );
+    orch.reload_config(config.clone());
+    assert!(*demand.borrow(), "long action is a ring trigger");
+    config.set_binding(
+        &key,
+        ButtonId::GestureButton,
+        Binding::Gesture(BTreeMap::from([(
+            openlogi_core::binding::GestureDirection::Right,
+            Action::ShowActionsRing,
+        )])),
+    );
+    orch.reload_config(config.clone());
+    assert!(*demand.borrow(), "directional action is a ring trigger");
+    config.set_binding(&key, ButtonId::GestureButton, Action::Copy.into());
+    config.keyboard.bindings.insert(
+        "f1".parse().expect("valid trigger"),
+        Action::ShowActionsRing,
+    );
+    orch.reload_config(config);
+    assert!(*demand.borrow(), "global keyboard trigger remains usable");
+}
 
 /// An *empty* snapshot still flips the health to `Ready`: the watcher only
 /// forwards completed enumerations, so "checked and found nothing" must not

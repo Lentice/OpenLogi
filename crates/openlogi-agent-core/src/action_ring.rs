@@ -121,6 +121,13 @@ impl Default for ActionRingManager {
 }
 
 impl ActionRingManager {
+    /// Read-only session state for the local overlay process supervisor.
+    /// An open session remains demand even after its triggering profile changes.
+    #[must_use]
+    pub fn subscribe(&self) -> watch::Receiver<RingObservation> {
+        self.published.subscribe()
+    }
+
     /// Open or replace the current session and wake the overlay long-poll.
     pub fn begin(&self, spec: ActionRingSessionSpec) -> ActionRingInvocation {
         let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
@@ -175,6 +182,21 @@ impl ActionRingManager {
         }
         self.publish(&state);
         dismissed
+    }
+
+    /// Cancel an open snapshot only when its device's ring was explicitly disabled.
+    /// Profile or layout edits otherwise preserve an already-open invocation.
+    pub fn dismiss_disabled(&self, config: &openlogi_core::config::Config) {
+        let mut state = self.state();
+        state.expire();
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|session| !config.action_ring(&session.device_key).enabled)
+        {
+            state.active = None;
+        }
+        self.publish(&state);
     }
 
     /// Serve one [`Agent::observe_action_ring`](openlogi_ipc::Agent::observe_action_ring).
@@ -293,6 +315,27 @@ mod tests {
             layout: ActionRingConfig::default().default,
             language: None,
         }
+    }
+
+    #[test]
+    fn a_config_reload_only_cancels_an_explicitly_disabled_session() {
+        let manager = ActionRingManager::default();
+        let observed = manager.subscribe();
+        let showing = manager.begin(spec());
+        let mut config = openlogi_core::config::Config::ephemeral();
+        config.set_action_ring_enabled("other-mouse", false);
+        manager.dismiss_disabled(&config);
+        assert_eq!(observed.borrow().invocation, Some(showing));
+        config.set_action_ring_enabled("mouse-a", false);
+        manager.dismiss_disabled(&config);
+        assert_eq!(observed.borrow().invocation, None);
+        config.set_action_ring_enabled("mouse-a", true);
+        manager.dismiss_disabled(&config);
+        assert_eq!(
+            observed.borrow().invocation,
+            None,
+            "reenable cannot revive an old session"
+        );
     }
 
     #[tokio::test]

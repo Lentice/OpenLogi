@@ -147,7 +147,10 @@ impl Agent for AgentServer {
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
                 let language = config.app_settings.language.clone();
-                self.orchestrator.lock().await.reload_config(config);
+                let mut orchestrator = self.orchestrator.lock().await;
+                self.action_ring.dismiss_disabled(&config);
+                orchestrator.reload_config(config);
+                drop(orchestrator);
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.

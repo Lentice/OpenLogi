@@ -101,6 +101,8 @@ pub struct SharedHandles {
     /// dispatch, keyed by the device the events arrive on. Carries each
     /// device's effective thumb-wheel sensitivity.
     pub capture_plans: SharedCapturePlans,
+    /// Whether the current inventory and bindings can invoke an Actions Ring.
+    pub action_ring_demand: watch::Receiver<bool>,
     pub capture_channel: CaptureChannelSlot,
     /// Exact-route channels owned and published by the inventory enumerator.
     pub channel_registry: ChannelRegistry,
@@ -265,6 +267,7 @@ pub struct Orchestrator {
     /// Private producer halves for the read-only runtime projections in
     /// `shared`, keeping the orchestrator's single-writer contract structural.
     capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
+    action_ring_demand_tx: watch::Sender<bool>,
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
     shared: SharedHandles,
@@ -311,6 +314,7 @@ impl Orchestrator {
     ) -> Self {
         let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
+        let (action_ring_demand_tx, action_ring_demand) = watch::channel(false);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let shared = SharedHandles {
             device_io: hardware.device_io(),
@@ -324,6 +328,7 @@ impl Orchestrator {
             )),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans,
+            action_ring_demand,
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
             keyboard_spec,
@@ -352,6 +357,7 @@ impl Orchestrator {
             manual_light_overrides: BTreeMap::new(),
             os_mouse_hook_available: false,
             capture_plans_tx,
+            action_ring_demand_tx,
             keyboard_spec_tx,
             host_switch_links_tx,
             shared,
@@ -534,6 +540,59 @@ impl Orchestrator {
 
     fn publish_capture_plans(&self) {
         publish_arc_if_changed(&self.capture_plans_tx, self.capture_plans_for());
+        let required = self.needs_action_ring_overlay();
+        self.action_ring_demand_tx.send_if_modified(|previous| {
+            let changed = *previous != required;
+            *previous = required;
+            changed
+        });
+    }
+
+    fn needs_action_ring_overlay(&self) -> bool {
+        let keyboard_trigger = self
+            .config
+            .keyboard
+            .bindings
+            .values()
+            .any(|action| *action == Action::ShowActionsRing);
+        self.devices
+            .iter()
+            .filter(|device| device.online && self.config.device_enabled(&device.config_key))
+            .any(|device| {
+                if self.action_ring_session(Some(&device.config_key)).is_none() {
+                    return false;
+                }
+                let app = if device.kind == DeviceKind::Keyboard {
+                    self.current_app.as_deref()
+                } else {
+                    self.mouse_context().0
+                };
+                keyboard_trigger
+                    || button_bindings_for(&self.config, Some(&device.config_key), app)
+                        .iter()
+                        .any(|(button, binding)| {
+                            // Inventory has no control-ID list. Haptic feedback is a
+                            // conservative warm-start proxy for the default panel;
+                            // a real invocation independently keeps the helper alive.
+                            if *button == ButtonId::HapticPanel
+                                && !device
+                                    .capabilities
+                                    .is_some_and(|capabilities| capabilities.haptic_feedback)
+                            {
+                                return false;
+                            }
+                            match binding {
+                                Binding::Single(action) => *action == Action::ShowActionsRing,
+                                Binding::LongPress(binding) => {
+                                    *binding.short() == Action::ShowActionsRing
+                                        || *binding.long() == Action::ShowActionsRing
+                                }
+                                Binding::Gesture(actions) => actions
+                                    .values()
+                                    .any(|action| *action == Action::ShowActionsRing),
+                            }
+                        })
+            })
     }
 
     /// Rewrite the per-device DPI-cycle map for every online device,

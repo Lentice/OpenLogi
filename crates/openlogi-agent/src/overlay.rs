@@ -1,7 +1,8 @@
 //! Supervision of the warm Actions Ring overlay helper.
 //!
 //! The helper owns no device state and exits harmlessly when its binary is not
-//! packaged. Keeping it warm removes process-start latency from panel presses.
+//! packaged. Usable ring bindings keep it warm; otherwise an actual invocation
+//! starts it on demand, and an unused helper exits without polling config files.
 //!
 //! Exactly one overlay may exist, and it belongs to one agent run. Both halves
 //! are enforced by the `succession` crate: this supervisor waits while the role
@@ -12,133 +13,291 @@
 //! recognizable on sight rather than after a timeout.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 use openlogi_core::brand;
 use openlogi_ipc::RUN_ENV;
 use succession::eviction::{self, AnonymousOutcome, Policy};
-use succession::supervision::{Event, Supervisor};
-use succession::{Role, Run};
+use succession::supervision::Restart;
+use succession::{Occupancy, Record, Role, Run, Verdict, verdict};
+use tokio::sync::watch;
 use tracing::{info, warn};
 
-/// Start the overlay supervisor on a dedicated thread.
-pub fn spawn() {
-    let Some(binary) = overlay_binary_path() else {
-        warn!("Actions Ring overlay binary not found — overlay disabled");
-        return;
-    };
-    let Ok(directory) = openlogi_core::paths::config_dir() else {
-        warn!("could not resolve the config directory — overlay disabled");
-        return;
-    };
-    let mine = Run::mint();
-    let mut supervisor = Supervisor::new(Role::new(directory, "overlay"), mine);
-    let result = std::thread::Builder::new()
-        .name("openlogi-overlay-supervisor".into())
-        .spawn(move || {
-            let mut spawn = move || {
-                Command::new(&binary)
-                    .env(RUN_ENV, mine.get().to_string())
-                    .spawn()
-            };
-            // The anonymous verdict repeats every poll for as long as the
-            // tenant lives, and answering it walks the process table. Answer
-            // once per spell of anonymity and stay quiet until the role
-            // changes hands.
-            let mut pressed_anonymous = false;
-            loop {
-                if let Err(error) = supervisor.tick(&mut spawn, &mut |event| {
-                    report(&event, &mut pressed_anonymous);
-                }) {
-                    // A role that cannot be probed is treated as free by the
-                    // next tick; refusing to look again would wait forever.
-                    warn!(%error, "could not read the Actions Ring overlay role");
-                }
-            }
-        });
-    if let Err(error) = result {
-        warn!(%error, "could not start the Actions Ring overlay supervisor");
+// Matches succession's private Supervisor default for pre-record helper migration.
+const ANONYMOUS_GRACE: Duration = Duration::from_secs(15);
+
+struct OwnedChild(Child);
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
     }
 }
 
-/// Ask the overlay to leave, on the way out of a deliberate agent shutdown.
-///
-/// The helper is spawned detached and the menu-bar Quit is a `process::exit`
-/// that runs no destructors, so without this the overlay outlives the agent
-/// until its own give-up deadline — a minute of a stray GPUI process in
-/// Activity Monitor after the user asked for everything to stop. Nothing here
-/// is load-bearing: the overlay leaves either way, so the policy is tuned for a
-/// Quit that still feels instant rather than for a guaranteed exit.
-///
-/// Only the tray platforms have a deliberate shutdown to hook. Elsewhere the
-/// agent runs until something kills it, and the overlay's own deadline is all
-/// there is.
+/// The armed lifecycle owns completion of helper teardown before process exit.
+pub(crate) struct Session {
+    shutdown: watch::Sender<bool>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Session {
+    pub(crate) async fn stop(mut self) {
+        self.shutdown.send_replace(true);
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.shutdown.send_replace(true);
+    }
+}
+
+/// Start supervision after arming; a disabled ring creates no helper process.
+pub(crate) fn spawn(
+    required: watch::Receiver<bool>,
+    ring: watch::Receiver<openlogi_ipc::RingObservation>,
+) -> Option<Session> {
+    let Some(binary) = overlay_binary_path() else {
+        warn!("Actions Ring overlay binary not found — overlay disabled");
+        return None;
+    };
+    let Ok(directory) = openlogi_core::paths::config_dir() else {
+        warn!("could not resolve the config directory — overlay disabled");
+        return None;
+    };
+    let mine = Run::mint();
+    let (shutdown, stopping) = watch::channel(false);
+    let task = tokio::spawn(supervise(
+        required,
+        ring,
+        stopping,
+        Role::new(directory, "overlay"),
+        mine,
+        move || {
+            Command::new(&binary)
+                .env(RUN_ENV, mine.get().to_string())
+                .spawn()
+        },
+        |pid| info!(pid, "Actions Ring overlay stopped"),
+    ));
+    Some(Session {
+        shutdown,
+        task: Some(task),
+    })
+}
+
+#[derive(PartialEq, Eq)]
+enum Activity {
+    Required,
+    Unused,
+    Stopped,
+}
+
+/// One authority for config demand, an open snapshot, and terminal shutdown.
+struct Demand {
+    required: watch::Receiver<bool>,
+    ring: watch::Receiver<openlogi_ipc::RingObservation>,
+    shutdown: watch::Receiver<bool>,
+}
+
+impl Demand {
+    fn activity(&mut self) -> Activity {
+        let stopping = *self.shutdown.borrow_and_update();
+        let configured = *self.required.borrow_and_update();
+        let showing = self.ring.borrow_and_update().invocation.is_some();
+        if stopping {
+            Activity::Stopped
+        } else if configured || showing {
+            Activity::Required
+        } else {
+            Activity::Unused
+        }
+    }
+
+    async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        tokio::select! {
+            result = self.required.changed() => result,
+            result = self.ring.changed() => result,
+            result = self.shutdown.changed() => result,
+        }
+    }
+}
+
+async fn supervise(
+    required: watch::Receiver<bool>,
+    ring: watch::Receiver<openlogi_ipc::RingObservation>,
+    shutdown: watch::Receiver<bool>,
+    role: Role,
+    mine: Run,
+    mut spawn: impl FnMut() -> std::io::Result<Child> + Send,
+    mut on_stopped: impl FnMut(u32) + Send,
+) {
+    let mut demand = Demand {
+        required,
+        ring,
+        shutdown,
+    };
+    let restart = Restart::default();
+    let mut delay = restart.base;
+    let mut retry_at = Instant::now();
+    let mut child: Option<(OwnedChild, Instant)> = None;
+    let mut waiting_since = None;
+    let mut pressed_anonymous = false;
+    loop {
+        let activity = demand.activity();
+        if activity != Activity::Required {
+            if let Some((child, _)) = child.take() {
+                let pid = child.0.id();
+                stop_child(child, role.clone()).await;
+                on_stopped(pid);
+            }
+            // Also retire an orphan from the preceding run when starting disabled.
+            let role = role.clone();
+            let _ = tokio::task::spawn_blocking(move || retire_role(&role)).await;
+            if activity == Activity::Stopped || demand.changed().await.is_err() {
+                return;
+            }
+            retry_at = Instant::now();
+            delay = restart.base;
+            waiting_since = None;
+            continue;
+        }
+        if let Some((running, started)) = child.as_mut() {
+            match running.0.try_wait() {
+                Ok(Some(status)) => {
+                    let ran_for = started.elapsed();
+                    info!(%status, ?ran_for, "Actions Ring overlay exited");
+                    delay = restart.next_delay(delay, ran_for);
+                    retry_at = Instant::now() + delay;
+                    child = None;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(%error, "could not wait for the Actions Ring overlay");
+                    if let Some((child, _)) = child.take() {
+                        stop_child(child, role.clone()).await;
+                    }
+                    retry_at = Instant::now() + delay;
+                }
+            }
+        } else if Instant::now() >= retry_at {
+            match role.occupancy() {
+                Ok(occupancy) => {
+                    let waited = waiting_since.map_or(Duration::ZERO, |at: Instant| at.elapsed());
+                    match verdict(&occupancy, mine, waited, ANONYMOUS_GRACE) {
+                        Verdict::Start => {
+                            waiting_since = None;
+                            // Recheck after role I/O; a disabled helper must not respawn.
+                            if demand.activity() == Activity::Required {
+                                match spawn() {
+                                    Ok(running) => {
+                                        child = Some((OwnedChild(running), Instant::now()));
+                                    }
+                                    Err(error) => {
+                                        warn!(%error, "could not start the Actions Ring overlay");
+                                        delay = restart.next_delay(delay, Duration::ZERO);
+                                        retry_at = Instant::now() + delay;
+                                    }
+                                }
+                            }
+                        }
+                        Verdict::Wait => {
+                            waiting_since.get_or_insert_with(Instant::now);
+                        }
+                        Verdict::Evict(record) => retire_superseded(record).await,
+                        Verdict::EvictAnonymous => {
+                            if !pressed_anonymous {
+                                pressed_anonymous = true;
+                                let _ =
+                                    tokio::task::spawn_blocking(evict_unidentified_overlay).await;
+                            }
+                        }
+                    }
+                    if !matches!(occupancy, Occupancy::HeldAnonymously) {
+                        pressed_anonymous = false;
+                    }
+                }
+                Err(error) => warn!(%error, "could not read the Actions Ring overlay role"),
+            }
+        }
+        tokio::select! {
+            result = demand.changed() => {
+                if result.is_err() {
+                    if let Some((child, _)) = child.take() { stop_child(child, role.clone()).await; }
+                    return;
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(500)) => {}
+        }
+    }
+}
+
+async fn stop_child(child: OwnedChild, role: Role) {
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Ok(Occupancy::HeldBy(record)) = role.occupancy()
+            && record.tenant.pid == child.0.id()
+        {
+            let _ = eviction::evict(&record, &quit_policy());
+        }
+        // The owned handle covers a child that has not published its role yet.
+        drop(child);
+    })
+    .await;
+}
+
+fn quit_policy() -> Policy {
+    Policy {
+        escalate_after: Some(Duration::from_millis(150)),
+        deadline: Duration::from_millis(750),
+        ..Policy::default()
+    }
+}
+
+fn retire_role(role: &Role) {
+    match role.occupancy() {
+        Ok(Occupancy::HeldBy(record)) => {
+            let _ = eviction::evict(&record, &quit_policy());
+        }
+        Ok(Occupancy::HeldAnonymously) => evict_unidentified_overlay(),
+        Ok(Occupancy::Free) | Err(_) => {}
+    }
+}
+
+/// Best-effort helper teardown when the tray's lifecycle owner is unavailable.
+/// Normal shutdown first disables supervision and waits for its owned child.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn evict_on_quit() {
-    use std::time::Duration;
-
-    use succession::Occupancy;
-
     let Ok(directory) = openlogi_core::paths::config_dir() else {
         return;
     };
     let Ok(Occupancy::HeldBy(record)) = Role::new(directory, "overlay").occupancy() else {
         return;
     };
-    let outcome = eviction::evict(
-        &record,
-        &Policy {
-            escalate_after: Some(Duration::from_millis(150)),
-            deadline: Duration::from_millis(750),
-            ..Policy::default()
-        },
-    );
+    let outcome = eviction::evict(&record, &quit_policy());
     info!(?outcome, "asked the overlay to leave before exiting");
 }
 
-/// Log what the supervisor did, and evict a tenant this agent has superseded.
-///
-/// Eviction is the migration path: an overlay that predates the claim record
-/// cannot recognize this agent as a different run, so it never yields on its
-/// own. Which of the two evictions applies depends on what the tenant said
-/// about itself, and neither takes a pid on faith — a record is checked
-/// against the live process ([`succession::Tenant::compare`]), and a tenant
-/// with no record at all is only ever recognized by the image we start the
-/// overlay from.
-fn report(event: &Event<'_>, pressed_anonymous: &mut bool) {
-    if !matches!(event, Event::SupersededAnonymously) {
-        *pressed_anonymous = false;
-    }
-    match *event {
-        Event::Superseded(record) => {
-            info!("{event}");
-            match eviction::evict(record, &Policy::default()) {
-                eviction::Outcome::Refused(sameness) => {
-                    warn!(
-                        ?sameness,
-                        "left the overlay alone — its pid no longer matches"
-                    );
-                }
-                outcome => info!(?outcome, "asked the superseded overlay to leave"),
+/// Retire an identified obsolete tenant without blocking the async lifecycle.
+/// Succession verifies its process identity before signalling the recorded PID.
+async fn retire_superseded(record: Record) {
+    let _ =
+        tokio::task::spawn_blocking(move || match eviction::evict(&record, &Policy::default()) {
+            eviction::Outcome::Refused(sameness) => {
+                warn!(
+                    ?sameness,
+                    "left the overlay alone — its pid no longer matches"
+                );
             }
-        }
-        // A tenant holding the role with no readable claim record: an overlay
-        // from an install that predates the record, or one whose publish
-        // failed. Nothing identifies it, so `succession` falls back on the
-        // image we start the overlay from and refuses unless exactly one
-        // process matches — otherwise the role stays wedged for as long as
-        // that process lives and the Actions Ring never comes up (#842).
-        Event::SupersededAnonymously => {
-            if std::mem::replace(pressed_anonymous, true) {
-                tracing::debug!("{event}");
-                return;
-            }
-            warn!("{event}");
-            evict_unidentified_overlay();
-        }
-        Event::Occupied(_) => tracing::debug!("{event}"),
-        _ => info!("{event}"),
-    }
+            outcome => info!(?outcome, "asked the superseded overlay to leave"),
+        })
+        .await;
 }
 
 /// Ask an unidentified tenant to leave, trying every image our overlay could
@@ -247,8 +406,164 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::process::Stdio;
 
     use super::*;
+
+    // Spawned only by the lifecycle test, never by a normal test invocation.
+    #[test]
+    #[ignore = "harmless subprocess for the overlay lifecycle test"]
+    fn helper_child() {
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[tokio::test]
+    async fn helper_lifecycle_follows_ring_demand() {
+        let directory = tempfile::tempdir().expect("private test role directory");
+        let (required, demand) = watch::channel(false);
+        let manager = openlogi_agent_core::action_ring::ActionRingManager::default();
+        let (shutdown, stopping) = watch::channel(false);
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let (stopped, mut stops) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(supervise(
+            demand,
+            manager.subscribe(),
+            stopping,
+            Role::new(directory.path(), "test-overlay"),
+            Run::mint(),
+            move || {
+                let child = Command::new(std::env::current_exe()?)
+                    .args(["--exact", "overlay::tests::helper_child", "--ignored"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()?;
+                started.send(child.id()).expect("test receiver is alive");
+                Ok(child)
+            },
+            move |pid| {
+                let _ = stopped.send(pid);
+            },
+        ));
+        let session = Session {
+            shutdown,
+            task: Some(task),
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), starts.recv())
+                .await
+                .is_err(),
+            "disabled startup must not spawn a helper"
+        );
+        let showing = manager.begin(openlogi_agent_core::action_ring::ActionRingSessionSpec {
+            device_key: "mouse".into(),
+            haptic_route: None,
+            layout: openlogi_core::binding::ActionRingConfig::default().default,
+            language: None,
+        });
+        let first = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+            .await
+            .expect("a real invocation starts even without a capability proxy")
+            .expect("spawn channel alive");
+        required.send_replace(true);
+        required.send_replace(false);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), starts.recv())
+                .await
+                .is_err(),
+            "disable must not respawn the helper"
+        );
+        assert!(
+            succession::Tenant::look_up(first).is_some(),
+            "a showing snapshot outlives a profile change"
+        );
+        manager.cancel(showing.session_id);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), stops.recv())
+                .await
+                .expect("dismissal stops the unused helper")
+                .expect("stop channel alive"),
+            first
+        );
+        required.send_replace(true);
+        let second = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+            .await
+            .expect("reenable starts promptly")
+            .expect("spawn channel alive");
+        assert_ne!(first, second);
+        assert!(
+            succession::Tenant::look_up(first).is_none(),
+            "reenable waits for old child teardown"
+        );
+        session.stop().await;
+        assert!(
+            succession::Tenant::look_up(second).is_none(),
+            "shutdown reaps the owned child"
+        );
+        required.send_replace(true);
+        assert!(
+            starts.recv().await.is_none(),
+            "shutdown closes the spawning loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_enabled_helper_restarts_after_exit() {
+        let directory = tempfile::tempdir().expect("private test role directory");
+        let (_required, demand) = watch::channel(true);
+        let manager = openlogi_agent_core::action_ring::ActionRingManager::default();
+        let (shutdown, stopping) = watch::channel(false);
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let mut first = true;
+        let task = tokio::spawn(supervise(
+            demand,
+            manager.subscribe(),
+            stopping,
+            Role::new(directory.path(), "test-overlay"),
+            Run::mint(),
+            move || {
+                // An unmatched test exits immediately, modelling a failed helper start.
+                let test = if first {
+                    "overlay::tests::absent_helper"
+                } else {
+                    "overlay::tests::helper_child"
+                };
+                first = false;
+                let child = Command::new(std::env::current_exe()?)
+                    .args(["--exact", test, "--ignored"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()?;
+                started.send(child.id()).expect("test receiver is alive");
+                Ok(child)
+            },
+            |_| {},
+        ));
+        let session = Session {
+            shutdown,
+            task: Some(task),
+        };
+        let first = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+            .await
+            .expect("initial child starts")
+            .expect("channel alive");
+        let replacement = tokio::time::timeout(Duration::from_secs(8), starts.recv())
+            .await
+            .expect("enabled child restarts after backoff")
+            .expect("channel alive");
+        assert_ne!(first, replacement);
+        assert!(
+            succession::Tenant::look_up(first).is_none(),
+            "exited child is reaped"
+        );
+        session.stop().await;
+        assert!(
+            succession::Tenant::look_up(replacement).is_none(),
+            "replacement is reaped on shutdown"
+        );
+        assert!(starts.recv().await.is_none());
+    }
 
     /// The tenant that wedges the role is one started before an update, and
     /// after the helpers were renamed its image is a path that no longer
