@@ -5,7 +5,7 @@
     reason = "the low-level input hook is built on the Win32 C API"
 )]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
@@ -39,6 +39,25 @@ use crate::{
 };
 
 const WHEEL_DELTA: f64 = 120.0;
+const PROCESS_PATH_CAPACITY: usize = 32_768;
+
+thread_local! {
+    // Foreground and pointer watchers each own their scratch space. Only the
+    // successful query's returned length is read; previous contents are inert.
+    static PROCESS_PATH_BUFFER: RefCell<Vec<u16>> = RefCell::new(vec![0; PROCESS_PATH_CAPACITY]);
+}
+
+fn query_process_path(
+    buffer: &mut [u16],
+    query: impl FnOnce(&mut [u16], &mut u32) -> bool,
+) -> Option<String> {
+    let mut len = u32::try_from(buffer.len()).ok()?;
+    if !query(buffer, &mut len) || len == 0 {
+        return None;
+    }
+    let path = buffer.get(..usize::try_from(len).ok()?)?;
+    Some(String::from_utf16_lossy(path))
+}
 
 /// Shared profile identity for both foreground and pointer-owned processes.
 pub(super) fn application_for_process(pid: u32) -> Option<ForegroundApp> {
@@ -47,16 +66,15 @@ pub(super) fn application_for_process(pid: u32) -> Option<ForegroundApp> {
     if process.is_null() {
         return None;
     }
-    let mut buf = vec![0u16; 32_768];
-    let mut len = 32_768;
-    // SAFETY: the owned handle is live and buf has len writable UTF-16 units.
-    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) };
+    let path = PROCESS_PATH_BUFFER.with_borrow_mut(|buffer| {
+        query_process_path(buffer, |buffer, len| {
+            // SAFETY: the owned handle is live and buffer has len writable UTF-16 units.
+            unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), len) != 0 }
+        })
+    });
     // SAFETY: this locally owned handle is closed exactly once after the query.
     unsafe { CloseHandle(process) };
-    if ok == 0 || len == 0 {
-        return None;
-    }
-    let path = String::from_utf16_lossy(&buf[..len as usize]);
+    let path = path?;
     let display_name = std::path::Path::new(&path)
         .file_stem()
         .map_or_else(|| path.clone(), |stem| stem.to_string_lossy().into_owned());
@@ -633,6 +651,71 @@ fn last_error(context: &str) -> HookError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn application_lookup_recovers_after_an_invalid_process() {
+        let first = application_for_process(std::process::id()).unwrap();
+        assert!(application_for_process(u32::MAX).is_none());
+        let again = application_for_process(std::process::id()).unwrap();
+        assert_eq!(first.id, again.id);
+        assert_eq!(first.display_name, again.display_name);
+        assert_eq!(
+            first.id,
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .to_lowercase()
+        );
+    }
+
+    #[test]
+    fn process_path_query_resets_capacity_and_ignores_stale_contents() {
+        let mut buffer = vec![0u16; super::PROCESS_PATH_CAPACITY];
+        let address = buffer.as_ptr();
+        for path in [
+            "C:\\short.exe".to_owned(),
+            "x".repeat(32_000),
+            "D:\\other.exe".to_owned(),
+        ] {
+            let units: Vec<_> = path.encode_utf16().collect();
+            let actual = super::query_process_path(&mut buffer, |buffer, len| {
+                assert_eq!(*len, 32_768);
+                buffer[..units.len()].copy_from_slice(&units);
+                *len = u32::try_from(units.len()).unwrap();
+                true
+            });
+            assert_eq!(actual.as_deref(), Some(path.as_str()));
+            assert_eq!(buffer.as_ptr(), address);
+        }
+        assert!(
+            super::query_process_path(&mut buffer, |_, len| {
+                *len = 5;
+                false
+            })
+            .is_none()
+        );
+        let recovered = super::query_process_path(&mut buffer, |buffer, len| {
+            assert_eq!(*len, 32_768);
+            buffer[0] = u16::from(b'z');
+            *len = 1;
+            true
+        });
+        assert_eq!(recovered.as_deref(), Some("z"));
+    }
+
+    #[test]
+    fn process_path_query_rejects_empty_or_out_of_bounds_results() {
+        let mut buffer = [0u16; 4];
+        for returned_len in [0, 5] {
+            assert!(
+                super::query_process_path(&mut buffer, |_, len| {
+                    *len = returned_len;
+                    true
+                })
+                .is_none()
+            );
+        }
+    }
+
     use super::*;
 
     /// A gesture button pressed before the hook has seen any motion used to

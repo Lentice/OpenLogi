@@ -13,7 +13,6 @@
 //! recognizable on sight rather than after a timeout.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use openlogi_core::brand;
@@ -21,20 +20,41 @@ use openlogi_ipc::RUN_ENV;
 use succession::eviction::{self, AnonymousOutcome, Policy};
 use succession::supervision::Restart;
 use succession::{Occupancy, Record, Role, Run, Verdict, verdict};
+use tokio::process::{Child, Command};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
 // Matches succession's private Supervisor default for pre-record helper migration.
 const ANONYMOUS_GRACE: Duration = Duration::from_secs(15);
 
-struct OwnedChild(Child);
+/// How often a required helper with no child rechecks a role it cannot take
+/// yet. A running child is awaited instead, and a backoff sleeps to its deadline.
+const ROLE_RECHECK: Duration = Duration::from_millis(500);
+
+/// A spawned helper and the pid it was started with, which outlives the
+/// handle's own `id()` once the process has been reaped.
+struct OwnedChild {
+    child: Child,
+    pid: u32,
+}
+
+impl OwnedChild {
+    fn new(child: Child) -> std::io::Result<Self> {
+        let pid = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("overlay exited before supervision"))?;
+        Ok(Self { child, pid })
+    }
+}
 
 impl Drop for OwnedChild {
+    /// Best effort for an unwinding or aborted supervisor, which cannot await
+    /// the exit: the kill is only requested, and Tokio's reaping of a dropped
+    /// Unix child is not bounded. Ordinary teardown goes through [`stop_child`].
     fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            let _ = self.0.kill();
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.start_kill();
         }
-        let _ = self.0.wait();
     }
 }
 
@@ -154,8 +174,8 @@ async fn supervise(
         let activity = demand.activity();
         if activity != Activity::Required {
             if let Some((child, _)) = child.take() {
-                let pid = child.0.id();
-                stop_child(child, role.clone()).await;
+                let pid = child.pid;
+                stop_child(child, role.clone(), mine).await;
                 on_stopped(pid);
             }
             // Also retire an orphan from the preceding run when starting disabled.
@@ -170,7 +190,7 @@ async fn supervise(
             continue;
         }
         if let Some((running, started)) = child.as_mut() {
-            match running.0.try_wait() {
+            match running.child.try_wait() {
                 Ok(Some(status)) => {
                     let ran_for = started.elapsed();
                     info!(%status, ?ran_for, "Actions Ring overlay exited");
@@ -182,7 +202,7 @@ async fn supervise(
                 Err(error) => {
                     warn!(%error, "could not wait for the Actions Ring overlay");
                     if let Some((child, _)) = child.take() {
-                        stop_child(child, role.clone()).await;
+                        stop_child(child, role.clone(), mine).await;
                     }
                     retry_at = Instant::now() + delay;
                 }
@@ -196,9 +216,9 @@ async fn supervise(
                             waiting_since = None;
                             // Recheck after role I/O; a disabled helper must not respawn.
                             if demand.activity() == Activity::Required {
-                                match spawn() {
+                                match spawn().and_then(OwnedChild::new) {
                                     Ok(running) => {
-                                        child = Some((OwnedChild(running), Instant::now()));
+                                        child = Some((running, Instant::now()));
                                     }
                                     Err(error) => {
                                         warn!(%error, "could not start the Actions Ring overlay");
@@ -227,29 +247,71 @@ async fn supervise(
                 Err(error) => warn!(%error, "could not read the Actions Ring overlay role"),
             }
         }
-        tokio::select! {
-            result = demand.changed() => {
-                if result.is_err() {
-                    if let Some((child, _)) = child.take() { stop_child(child, role.clone()).await; }
-                    return;
-                }
+        let running = child.as_mut().map(|(running, _)| running);
+        if next_change(&mut demand, running, retry_at).await {
+            if let Some((child, _)) = child.take() {
+                stop_child(child, role.clone(), mine).await;
             }
-            () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            return;
         }
     }
 }
 
-async fn stop_child(child: OwnedChild, role: Role) {
+/// Wait for the next reason to reevaluate required supervision; `true` once
+/// demand has closed. A running child is awaited, not polled, and its status
+/// is cached for the supervisor's `try_wait`. Without one, sleep to the backoff
+/// deadline, or recheck a role this supervisor cannot take yet.
+async fn next_change(
+    demand: &mut Demand,
+    child: Option<&mut OwnedChild>,
+    retry_at: Instant,
+) -> bool {
+    let woken = async {
+        if let Some(running) = child {
+            let _ = running.child.wait().await;
+        } else {
+            let recheck_at = if retry_at > Instant::now() {
+                retry_at
+            } else {
+                Instant::now() + ROLE_RECHECK
+            };
+            tokio::time::sleep_until(recheck_at.into()).await;
+        }
+    };
+    tokio::select! {
+        result = demand.changed() => result.is_err(),
+        () = woken => false,
+    }
+}
+
+async fn stop_child(mut child: OwnedChild, role: Role, mine: Run) {
+    // A child already reaped — `next_change` may have awaited its exit — no
+    // longer pins its pid, so a role record carrying that pid is someone else.
+    if matches!(child.child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let pid = child.pid;
     let _ = tokio::task::spawn_blocking(move || {
         if let Ok(Occupancy::HeldBy(record)) = role.occupancy()
-            && record.tenant.pid == child.0.id()
+            && is_owned_child(&record, mine, pid)
         {
             let _ = eviction::evict(&record, &quit_policy());
         }
-        // The owned handle covers a child that has not published its role yet.
-        drop(child);
     })
     .await;
+    // The owned handle covers a child that has not published its role yet, or
+    // ignored the request to leave; reap it before reporting it stopped.
+    if !matches!(child.child.try_wait(), Ok(Some(_))) {
+        let _ = child.child.kill().await;
+    }
+    let _ = child.child.wait().await;
+}
+
+/// Whether `record` is the unreaped child this run spawned as `pid`. Until it
+/// is reaped the child pins its pid, so the pid names that process; the run
+/// guards against a record some other owner wrote.
+fn is_owned_child(record: &Record, mine: Run, pid: u32) -> bool {
+    record.identity.run == mine && record.tenant.pid == pid
 }
 
 fn quit_policy() -> Policy {
@@ -408,6 +470,8 @@ mod tests {
     use std::path::Path;
     use std::process::Stdio;
 
+    use tokio::process::Command;
+
     use super::*;
 
     // Spawned only by the lifecycle test, never by a normal test invocation.
@@ -439,7 +503,9 @@ mod tests {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()?;
-                started.send(child.id()).expect("test receiver is alive");
+                started
+                    .send(child.id().expect("a freshly spawned child has a pid"))
+                    .expect("test receiver is alive");
                 Ok(child)
             },
             move |pid| {
@@ -535,7 +601,9 @@ mod tests {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()?;
-                started.send(child.id()).expect("test receiver is alive");
+                started
+                    .send(child.id().expect("a freshly spawned child has a pid"))
+                    .expect("test receiver is alive");
                 Ok(child)
             },
             |_| {},
@@ -589,6 +657,67 @@ mod tests {
             images.iter().any(|image| image == legacy),
             "the pre-rename image must stay a candidate: {images:?}"
         );
+    }
+
+    #[test]
+    fn only_this_runs_record_for_the_child_pid_is_owned() {
+        let mine = Run::from_raw(7);
+        let record = |run, pid| {
+            Record::new(
+                succession::Identity::new(Run::from_raw(run), succession::Compat::from_raw(1)),
+                succession::Tenant {
+                    pid,
+                    started_at: None,
+                    image: None,
+                },
+            )
+        };
+        assert!(is_owned_child(&record(7, 42), mine, 42));
+        assert!(
+            !is_owned_child(&record(8, 42), mine, 42),
+            "another run's tenant"
+        );
+        assert!(!is_owned_child(&record(7, 43), mine, 42), "another process");
+    }
+
+    fn test_helper(test: &str) -> Child {
+        Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", test, "--ignored"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn a test helper")
+    }
+
+    #[tokio::test]
+    async fn stopping_a_reaped_child_leaves_its_pids_next_owner_alone() {
+        let directory = tempfile::tempdir().expect("private test role directory");
+        let role = Role::new(directory.path(), "test-overlay");
+        let mine = Run::mint();
+        let mut reaped = test_helper("overlay::tests::absent_helper");
+        reaped.wait().await.expect("the child exits and is reaped");
+        // Model the pid being recycled: a live tenant of this run's role now
+        // carries the pid the reaped child was spawned with.
+        let mut successor = test_helper("overlay::tests::helper_child");
+        let successor_pid = successor.id().expect("the successor is running");
+        let tenant = succession::Tenant::look_up(successor_pid).expect("the successor is visible");
+        let _tenancy = role
+            .claim(&Record::new(
+                succession::Identity::new(mine, succession::Compat::from_raw(1)),
+                tenant,
+            ))
+            .expect("claim the test role");
+        let child = OwnedChild {
+            child: reaped,
+            pid: successor_pid,
+        };
+        stop_child(child, role.clone(), mine).await;
+        assert!(
+            matches!(successor.try_wait(), Ok(None)),
+            "a reaped child's pid must not evict the role's current tenant"
+        );
+        successor.kill().await.expect("stop the successor");
     }
 
     #[test]

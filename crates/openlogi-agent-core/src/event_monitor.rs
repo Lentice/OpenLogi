@@ -7,7 +7,8 @@
 //! polling. The GUI enables monitoring implicitly by polling
 //! [`EventMonitor::poll`], and [`EventMonitor::run_idle_janitor`] turns it back
 //! off when polls stop — so a closed panel or a crashed GUI can't leave the
-//! callback doing buffer work forever.
+//! callback doing buffer work forever. The janitor holds no timer while
+//! monitoring is off.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -16,6 +17,7 @@ use std::time::Duration;
 
 use openlogi_hook::MouseEvent;
 use openlogi_ipc::MonitorEvent;
+use tokio::sync::Notify;
 
 /// A shared [`EventMonitor`], threaded between the hook callback (writer) and
 /// the IPC server (reader/poller).
@@ -52,6 +54,8 @@ impl MonitorState {
 pub struct EventMonitor {
     state: AtomicU8,
     buf: Mutex<VecDeque<MonitorEvent>>,
+    /// Wakes the janitor when a poll turns monitoring on.
+    enabled: Notify,
 }
 
 impl Default for EventMonitor {
@@ -59,6 +63,7 @@ impl Default for EventMonitor {
         Self {
             state: AtomicU8::new(MonitorState::Disabled as u8),
             buf: Mutex::default(),
+            enabled: Notify::new(),
         }
     }
 }
@@ -109,8 +114,12 @@ impl EventMonitor {
     /// Enable monitoring (idempotent) and drain everything buffered since the
     /// last poll. Called from the IPC `poll_event_monitor` handler.
     pub fn poll(&self) -> Vec<MonitorEvent> {
-        self.state
-            .store(MonitorState::Polled as u8, Ordering::Release);
+        let previous = self
+            .state
+            .swap(MonitorState::Polled as u8, Ordering::AcqRel);
+        if MonitorState::from_raw(previous) == MonitorState::Disabled {
+            self.enabled.notify_one();
+        }
         self.buf
             .lock()
             .map(|mut buf| buf.drain(..).collect())
@@ -148,22 +157,31 @@ impl EventMonitor {
     }
 
     /// Auto-disable monitoring when the GUI stops polling. Runs for the life of
-    /// the agent: each tick, if monitoring is on but no poll arrived since the
-    /// previous tick, the GUI is gone — disable and free the buffer.
+    /// the agent: while monitoring is on, each tick that finds no poll since the
+    /// previous tick means the GUI is gone — disable and free the buffer. While
+    /// monitoring is off it waits for the enabling poll without a timer.
     pub async fn run_idle_janitor(self: SharedEventMonitor) {
-        // `interval` fires its first tick immediately; `interval_at` delays the
-        // first check by a full `IDLE_CHECK_PERIOD`. That matters on an agent
-        // restart while monitoring was enabled: an immediate first tick would
-        // see `enabled == true` with no poll yet this window and disable before
-        // the reconnecting GUI repolls. Waiting one full window lets it poll
-        // first.
-        let mut ticker = tokio::time::interval_at(
-            tokio::time::Instant::now() + IDLE_CHECK_PERIOD,
-            IDLE_CHECK_PERIOD,
-        );
         loop {
-            ticker.tick().await;
-            self.idle_tick();
+            // `notify_one` keeps a permit when nobody waits, so a poll that
+            // enables monitoring between this check and the await still wakes
+            // it. A stale permit only repeats the check.
+            while !self.enabled() {
+                self.enabled.notified().await;
+            }
+            // `interval` fires its first tick immediately; `interval_at`
+            // delays the first check by a full `IDLE_CHECK_PERIOD`, so the
+            // enabling poll always gets one whole window before it can expire.
+            let mut ticker = tokio::time::interval_at(
+                tokio::time::Instant::now() + IDLE_CHECK_PERIOD,
+                IDLE_CHECK_PERIOD,
+            );
+            // A stalled runtime must not replay missed ticks back to back:
+            // two catch-up ticks would expire a poll inside one real window.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            while self.enabled() {
+                ticker.tick().await;
+                self.idle_tick();
+            }
         }
     }
 }
@@ -221,6 +239,24 @@ mod tests {
             });
         }
         assert_eq!(m.poll().len(), CAPACITY, "never grows past the cap");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn janitor_disables_after_polls_stop_and_rearms_on_the_next_poll() {
+        let m = SharedEventMonitor::default();
+        let janitor = tokio::spawn(std::sync::Arc::clone(&m).run_idle_janitor());
+        // Disabled: the janitor holds no timer, so elapsed time changes nothing.
+        tokio::time::sleep(IDLE_CHECK_PERIOD * 10).await;
+        assert!(!m.enabled());
+
+        for _ in 0..2 {
+            m.poll();
+            tokio::time::sleep(IDLE_CHECK_PERIOD + Duration::from_millis(1)).await;
+            assert!(m.enabled(), "the enabling poll survives its first window");
+            tokio::time::sleep(IDLE_CHECK_PERIOD).await;
+            assert!(!m.enabled(), "a whole window without a poll disables it");
+        }
+        janitor.abort();
     }
 
     #[test]

@@ -81,3 +81,61 @@ fn direct_inventory(serial_number: Option<&str>, unit_id: [u8; 4]) -> DeviceInve
         }],
     }
 }
+
+#[test]
+fn pointer_discovery_round_trip_rejects_old_samples_and_restarts_unavailable() {
+    use crate::watchers::pointer::Observation;
+    use openlogi_core::config::MouseProfileTarget;
+    use openlogi_hook::{PointerContext, PointerTarget};
+    let mut orch = orchestrator(Config::default());
+    let initial = *orch.shared.pointer_discovery.borrow();
+    let context = PointerContext {
+        app: None,
+        target: PointerTarget::Desktop,
+    };
+    assert!(orch.set_pointer_observation(Observation {
+        demand: initial,
+        context: context.clone()
+    }));
+    let mut config = orch.config.clone();
+    config.app_settings.mouse_profile_target = MouseProfileTarget::Focused;
+    orch.reload_config(config.clone());
+    config.app_settings.mouse_profile_target = MouseProfileTarget::Pointer;
+    orch.reload_config(config);
+    assert_eq!(orch.mouse_context().1, Some(PointerTarget::Unavailable));
+    assert!(!orch.set_pointer_observation(Observation {
+        demand: initial,
+        context: context.clone()
+    }));
+    assert_eq!(orch.mouse_context().1, Some(PointerTarget::Unavailable));
+    let fresh = *orch.shared.pointer_discovery.borrow();
+    assert_ne!(fresh, initial);
+    assert!(orch.set_pointer_observation(Observation {
+        demand: fresh,
+        context
+    }));
+    assert_eq!(orch.mouse_context().1, Some(PointerTarget::Desktop));
+}
+
+#[test]
+fn unsupported_pointer_capability_survives_config_reload_before_consumption() {
+    use crate::watchers::pointer::Observation;
+    use openlogi_core::config::MouseProfileTarget;
+    use openlogi_hook::{PointerContext, PointerTarget};
+    let mut orch = orchestrator(Config::default());
+    let initial = *orch.shared.pointer_discovery.borrow();
+    let mut config = orch.config.clone();
+    config.app_settings.mouse_profile_target = MouseProfileTarget::Focused;
+    orch.reload_config(config.clone());
+    orch.set_pointer_observation(Observation {
+        demand: initial,
+        context: PointerContext {
+            app: None,
+            target: PointerTarget::Unsupported,
+        },
+    });
+    config.app_settings.mouse_profile_target = MouseProfileTarget::Pointer;
+    orch.reload_config(config);
+    assert_eq!(orch.pointer_context.target, PointerTarget::Unsupported);
+    assert_eq!(orch.mouse_context().1, None);
+}

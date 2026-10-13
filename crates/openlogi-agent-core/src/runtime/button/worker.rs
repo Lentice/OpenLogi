@@ -6,8 +6,7 @@ use std::time::Instant;
 
 use super::{
     ActivePress, ButtonCommand, ButtonInput, ButtonRuntimeEvent, ButtonState, CancelReason,
-    EVENT_QUEUE_CAPACITY, EndReason, PressBehavior, PressToken, SHUTDOWN_POLL_PERIOD,
-    ShutdownRequest,
+    EVENT_QUEUE_CAPACITY, EndReason, PressBehavior, PressToken, ShutdownRequest,
 };
 
 pub(super) fn run_worker(
@@ -16,13 +15,33 @@ pub(super) fn run_worker(
     shared_generation: &AtomicU64,
     emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) {
+    run_worker_observing_wait(events, shutdown, shared_generation, emit, &mut |_| {});
+}
+
+pub(super) fn run_worker_observing_wait(
+    events: &mpsc::Receiver<ButtonCommand>,
+    shutdown: &mpsc::Receiver<ShutdownRequest>,
+    shared_generation: &AtomicU64,
+    emit: &mut impl FnMut(ButtonRuntimeEvent),
+    before_wait: &mut impl FnMut(Option<Instant>),
+) {
     let mut state = ButtonState::default();
     let mut generation = shared_generation.load(Ordering::Acquire);
     loop {
         if finish_shutdown_if_requested(shutdown, &mut state, emit) {
             return;
         }
-        let command = match events.recv_timeout(SHUTDOWN_POLL_PERIOD) {
+        let deadline = state.next_deadline();
+        before_wait(deadline);
+        let received = match deadline {
+            Some(deadline) => {
+                events.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            }
+            None => events
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        let command = match received {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if settle_due_long_presses(

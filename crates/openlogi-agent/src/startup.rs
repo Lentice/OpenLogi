@@ -229,7 +229,7 @@ pub(crate) enum WatcherEvent {
     /// Camera activity flipped.
     Camera(bool),
     App(watchers::foreground_app::ForegroundUpdate),
-    Pointer(openlogi_hook::PointerContext),
+    Pointer(watchers::pointer::Observation),
     /// The Accessibility grant flipped.
     Accessibility(bool),
     /// The Input Monitoring grant flipped.
@@ -280,7 +280,7 @@ pub(crate) fn spawn_state_watchers(
         shared.channel_registry.clone(),
     );
     shared.publish_inventory_refresh(inventory.refresh.clone());
-    let mut pointer = watchers::pointer::spawn();
+    let mut pointer = watchers::pointer::spawn(shared.pointer_discovery.clone());
     // Publish capability even when an unsupported source has no worker and
     // closes immediately. The orchestrator starts unknown, never guessing.
     pointer.mark_changed();

@@ -758,6 +758,7 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
     shutdown_tx
         .send(ShutdownRequest { done })
         .expect("worker should accept shutdown");
+    let _ = commands.try_send(ButtonCommand::Wake);
     wait.recv_timeout(Duration::from_secs(1))
         .expect("worker should finish shutdown");
     worker.join().expect("worker should stop");
@@ -931,4 +932,107 @@ fn shutdown_deadline_includes_a_blocked_terminal_handler() {
     assert!(!owner.shutdown_with_timeout(Duration::from_millis(20)));
     assert!(started.elapsed() < Duration::from_millis(200));
     let _ = release_tx.send(());
+}
+
+#[test]
+fn idle_worker_shutdown_wakes_without_an_input_event() {
+    let (waiting, entered) = mpsc::sync_channel(0);
+    let (resume, blocked) = mpsc::sync_channel(0);
+    let (events, event_rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
+    let (shutdown, shutdown_rx) = mpsc::channel();
+    let generation = Arc::new(AtomicU64::new(0));
+    let input = ButtonInputHandle {
+        events,
+        generation: Arc::clone(&generation),
+        accepting: Arc::new(AtomicBool::new(true)),
+        next_press: Arc::new(AtomicU64::new(1)),
+    };
+    let worker = thread::spawn(move || {
+        worker::run_worker_observing_wait(
+            &event_rx,
+            &shutdown_rx,
+            &generation,
+            &mut |_| panic!("idle worker has no presses"),
+            &mut |deadline| {
+                assert_eq!(deadline, None);
+                waiting.send(()).expect("test awaits receive checkpoint");
+                blocked.recv().expect("test resumes receive");
+            },
+        );
+    });
+    let mut owner = ButtonRuntimeOwner {
+        input,
+        shutdown,
+        worker: Some(worker),
+    };
+    entered
+        .recv()
+        .expect("worker checked shutdown before waiting");
+    // The next step is recv(), without another shutdown-channel check.
+    // A request without a Wake would leave this worker blocked forever.
+    resume.send(()).expect("worker enters its idle receive");
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn full_queue_invalidation_cancels_a_press_after_the_handler_resumes() {
+    let (sent, received) = mpsc::channel();
+    let (resume, blocked) = mpsc::sync_channel(0);
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        let started = matches!(&event, ButtonRuntimeEvent::Started(_));
+        sent.send(event).expect("receiver stays connected");
+        if started {
+            blocked.recv().expect("test resumes handler");
+        }
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    assert!(input.try_hook_down(ButtonId::Back, None).is_some());
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    for _ in 0..EVENT_QUEUE_CAPACITY {
+        input
+            .events
+            .try_send(ButtonCommand::Wake)
+            .expect("queue has room");
+    }
+    assert!(!input.try_command(ButtonCommand::Wake));
+    resume.send(()).expect("handler should resume");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::Invalidated),
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn next_deadline_tracks_pending_presses_and_returns_to_idle() {
+    let binding = long_press(Action::Copy, Action::Paste);
+    let now = Instant::now();
+    let mut state = ButtonState::default();
+    state.press(hook_press(1, ButtonId::Back));
+    assert_eq!(state.next_deadline(), None);
+    let mut first = hook_press(2, ButtonId::Forward);
+    first.behavior = PressBehavior::new(Some(&binding), now);
+    state.press(first.clone());
+    let mut second = hook_press(3, ButtonId::MiddleClick);
+    second.behavior = PressBehavior::new(Some(&binding), now + Duration::from_millis(20));
+    state.press(second.clone());
+    assert_eq!(state.next_deadline(), Some(now + LONG_PRESS_THRESHOLD));
+    state.cancel_press(&first.token);
+    assert_eq!(
+        state.next_deadline(),
+        Some(now + LONG_PRESS_THRESHOLD + Duration::from_millis(20))
+    );
+    emit_due_long_presses(
+        &mut state,
+        now + LONG_PRESS_THRESHOLD + Duration::from_millis(20),
+        &mut |_| {},
+    );
+    assert_eq!(state.next_deadline(), None);
 }

@@ -23,8 +23,6 @@ use super::ActionDispatchTarget;
 const EVENT_QUEUE_CAPACITY: usize = 128;
 /// Bounds how long graceful process exit waits for terminal handlers.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
-/// Lets the worker observe the out-of-band shutdown channel even while idle.
-const SHUTDOWN_POLL_PERIOD: Duration = Duration::from_millis(10);
 
 /// Process-unique identity of one HID++ hardware capture incarnation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -340,6 +338,13 @@ struct ButtonState {
 }
 
 impl ButtonState {
+    fn next_deadline(&self) -> Option<Instant> {
+        self.active
+            .values()
+            .filter_map(|press| press.behavior.deadline())
+            .min()
+    }
+
     fn press(&mut self, press: ActivePress) -> Option<ActivePress> {
         self.active.insert(press.token.key.clone(), press)
     }
@@ -626,6 +631,9 @@ impl ButtonInputHandle {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(_)) => {
                 self.generation.fetch_add(1, Ordering::AcqRel);
+                // The worker may have drained the queue after try_send failed.
+                // Publish invalidation before ensuring it has a wake to observe.
+                let _ = self.events.try_send(ButtonCommand::Wake);
                 warn!("button lifecycle queue full — invalidating active presses");
                 false
             }
@@ -689,6 +697,9 @@ impl ButtonRuntimeOwner {
             let _ = worker.join();
             return false;
         }
+        // Publish the control request first. A full queue already contains a
+        // wake source; otherwise this interrupts the worker's blocking receive.
+        let _ = self.input.events.try_send(ButtonCommand::Wake);
         if wait.recv_timeout(timeout).is_err() {
             warn!("button lifecycle worker did not shut down before the deadline");
             // Dropping a JoinHandle detaches the worker; the queued request

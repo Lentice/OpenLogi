@@ -370,7 +370,19 @@ impl Running {
                 self.orchestrator.lock().await.set_camera_active(active);
             }
             WatcherEvent::App(app) => self.apply_foreground(app).await,
-            WatcherEvent::Pointer(context) => self.apply_pointer_context(context).await,
+            WatcherEvent::Pointer(observation) => {
+                let current = observation.context.target;
+                if self
+                    .orchestrator
+                    .lock()
+                    .await
+                    .set_pointer_observation(observation)
+                {
+                    self.inputs
+                        .dispatcher
+                        .cancel_pointer_buttons_except(current);
+                }
+            }
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
                 self.observable.set_input_monitoring_granted(granted);

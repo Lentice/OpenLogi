@@ -103,6 +103,8 @@ pub struct SharedHandles {
     pub capture_plans: SharedCapturePlans,
     /// Whether the current inventory and bindings can invoke an Actions Ring.
     pub action_ring_demand: watch::Receiver<bool>,
+    /// Config-owned discovery policy and session identity.
+    pub pointer_discovery: watch::Receiver<crate::watchers::pointer::DiscoveryDemand>,
     pub capture_channel: CaptureChannelSlot,
     /// Exact-route channels owned and published by the inventory enumerator.
     pub channel_registry: ChannelRegistry,
@@ -268,6 +270,7 @@ pub struct Orchestrator {
     /// `shared`, keeping the orchestrator's single-writer contract structural.
     capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
     action_ring_demand_tx: watch::Sender<bool>,
+    pointer_discovery_tx: watch::Sender<crate::watchers::pointer::DiscoveryDemand>,
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
     shared: SharedHandles,
@@ -315,6 +318,11 @@ impl Orchestrator {
         let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (action_ring_demand_tx, action_ring_demand) = watch::channel(false);
+        let (pointer_discovery_tx, pointer_discovery) =
+            watch::channel(crate::watchers::pointer::DiscoveryDemand {
+                mode: config.app_settings.mouse_profile_target,
+                generation: 0,
+            });
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let shared = SharedHandles {
             device_io: hardware.device_io(),
@@ -329,6 +337,7 @@ impl Orchestrator {
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans,
             action_ring_demand,
+            pointer_discovery,
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
             keyboard_spec,
@@ -358,6 +367,7 @@ impl Orchestrator {
             os_mouse_hook_available: false,
             capture_plans_tx,
             action_ring_demand_tx,
+            pointer_discovery_tx,
             keyboard_spec_tx,
             host_switch_links_tx,
             shared,
@@ -1050,6 +1060,19 @@ impl Orchestrator {
         true
     }
 
+    /// Apply a discovery result only if it belongs to the current config session.
+    pub fn set_pointer_observation(
+        &mut self,
+        observation: crate::watchers::pointer::Observation,
+    ) -> bool {
+        if observation.context.target != openlogi_hook::PointerTarget::Unsupported
+            && observation.demand != *self.pointer_discovery_tx.borrow()
+        {
+            return false;
+        }
+        self.set_pointer_context(observation.context)
+    }
+
     /// Publish a pointer-window change separately from keyboard focus. The
     /// target travels in the same snapshot as its effective mouse bindings.
     /// Returns whether pointer-scoped presses must be canceled.
@@ -1070,6 +1093,22 @@ impl Orchestrator {
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     pub fn reload_config(&mut self, config: Config) {
         let previous = std::mem::replace(&mut self.config, config);
+        if previous.app_settings.mouse_profile_target
+            != self.config.app_settings.mouse_profile_target
+        {
+            // Invalidate before rebuilding maps. A newly enabled watcher must
+            // provide a fresh sample; old targets cannot admit a first press.
+            if self.pointer_context.target != openlogi_hook::PointerTarget::Unsupported {
+                self.pointer_context = openlogi_hook::PointerContext {
+                    app: None,
+                    target: openlogi_hook::PointerTarget::Unavailable,
+                };
+            }
+            self.pointer_discovery_tx.send_modify(|demand| {
+                demand.mode = self.config.app_settings.mouse_profile_target;
+                demand.generation = demand.generation.wrapping_add(1);
+            });
+        }
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
         self.shared.scroll_preferences.publish(
