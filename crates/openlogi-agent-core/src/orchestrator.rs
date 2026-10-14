@@ -33,6 +33,7 @@ use tracing::{debug, info, warn};
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    thumbwheel_capture_configured,
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, FnLockOrder, HardwareContext, VolatileMouseSettings,
@@ -44,6 +45,7 @@ use crate::runtime::scroll::ScrollPreferences;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
+use crate::watchers::pointer::{PointerPolicy, PointerScope};
 use crate::{DpiCycleState, DpiCycles};
 
 mod devices;
@@ -320,7 +322,7 @@ impl Orchestrator {
         let (action_ring_demand_tx, action_ring_demand) = watch::channel(false);
         let (pointer_discovery_tx, pointer_discovery) =
             watch::channel(crate::watchers::pointer::DiscoveryDemand {
-                mode: config.app_settings.mouse_profile_target,
+                policy: pointer_policy(&config),
                 generation: 0,
             });
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
@@ -392,16 +394,22 @@ impl Orchestrator {
             .map(|d| d.config_key.as_str())
     }
 
-    fn mouse_context(&self) -> (Option<&str>, Option<openlogi_hook::PointerTarget>) {
-        if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused
-            || self.pointer_context.target == openlogi_hook::PointerTarget::Unsupported
-        {
-            (self.current_app.as_deref(), None)
-        } else {
-            (
+    /// The application mouse bindings resolve against, and the pointer
+    /// identity their presses carry. A missing pointer backend falls back to
+    /// focused profiles under every policy.
+    fn mouse_context(&self) -> (Option<&str>, PointerScope) {
+        let policy = self.pointer_discovery_tx.borrow().policy;
+        if self.pointer_context.target == openlogi_hook::PointerTarget::Unsupported {
+            return (self.current_app.as_deref(), PointerScope::Focused);
+        }
+        match policy {
+            PointerPolicy::Focused => (self.current_app.as_deref(), PointerScope::Focused),
+            // Every application resolves to the same mouse bindings.
+            PointerPolicy::OnDemand => (None, PointerScope::OnDemand),
+            PointerPolicy::Continuous => (
                 self.pointer_context.app.as_ref().map(|app| app.id.as_str()),
-                Some(self.pointer_context.target),
-            )
+                PointerScope::Sampled(self.pointer_context.target),
+            ),
         }
     }
 
@@ -416,7 +424,7 @@ impl Orchestrator {
         if key.is_some_and(|k| !self.config.device_enabled(k)) {
             return HookMaps::default();
         }
-        let (app, pointer_target) = self.mouse_context();
+        let (app, pointer_scope) = self.mouse_context();
         let mut bindings = button_bindings_for(&self.config, key, app);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
         if let Some(key) = key {
@@ -431,7 +439,7 @@ impl Orchestrator {
         HookMaps {
             bindings,
             gestures,
-            pointer_target,
+            pointer_scope,
             selected_device: key.map(str::to_owned),
             ..HookMaps::default()
         }
@@ -661,8 +669,8 @@ impl Orchestrator {
                 let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
                 let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
                     .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
-                let (app, pointer_target) = if dev.kind == DeviceKind::Keyboard {
-                    (self.current_app.as_deref(), None)
+                let (app, pointer_scope) = if dev.kind == DeviceKind::Keyboard {
+                    (self.current_app.as_deref(), PointerScope::Focused)
                 } else {
                     self.mouse_context()
                 };
@@ -675,7 +683,7 @@ impl Orchestrator {
                     rearm_generation,
                     self.os_mouse_hook_available,
                 );
-                plan.dispatch.pointer_target = pointer_target;
+                plan.dispatch.pointer_scope = pointer_scope;
                 if let Some(keyboard) = keyboard
                     .as_ref()
                     .filter(|keyboard| keyboard.route == plan.target.route)
@@ -1080,22 +1088,24 @@ impl Orchestrator {
         if self.pointer_context == context {
             return false;
         }
-        let previous = self.mouse_context().1;
+        let (previous_app, previous_scope) = self.mouse_context();
+        let previous_app = previous_app.map(str::to_owned);
         self.pointer_context = context;
-        if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused {
+        let (app, scope) = self.mouse_context();
+        // Focused and on-demand bindings ignore the sampled context.
+        if app == previous_app.as_deref() && scope == previous_scope {
             return false;
         }
         self.publish_hook_maps(self.hook_maps_for(self.current_key()));
         self.publish_capture_plans();
-        previous != self.mouse_context().1
+        scope != previous_scope
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     pub fn reload_config(&mut self, config: Config) {
         let previous = std::mem::replace(&mut self.config, config);
-        if previous.app_settings.mouse_profile_target
-            != self.config.app_settings.mouse_profile_target
-        {
+        let policy = pointer_policy(&self.config);
+        if policy != self.pointer_discovery_tx.borrow().policy {
             // Invalidate before rebuilding maps. A newly enabled watcher must
             // provide a fresh sample; old targets cannot admit a first press.
             if self.pointer_context.target != openlogi_hook::PointerTarget::Unsupported {
@@ -1105,7 +1115,7 @@ impl Orchestrator {
                 };
             }
             self.pointer_discovery_tx.send_modify(|demand| {
-                demand.mode = self.config.app_settings.mouse_profile_target;
+                demand.policy = policy;
                 demand.generation = demand.generation.wrapping_add(1);
             });
         }
@@ -1176,6 +1186,29 @@ impl Orchestrator {
                 );
             }
         }
+    }
+}
+
+/// How mouse profiles use the pointer under `config` on this platform.
+///
+/// Pointer-selected profiles sample the hovered window continuously only when
+/// that sample can change an outcome: some device has per-app bindings, or a
+/// thumb wheel is captured, whose accumulator and pending scroll output end
+/// when the hovered window changes. Otherwise the button worker queries the
+/// pointer per press. Only Windows queries cheaply and off the main thread;
+/// macOS hops to its main thread and Linux makes synchronous X11 round trips,
+/// so they keep continuous sampling.
+fn pointer_policy(config: &Config) -> PointerPolicy {
+    match config.app_settings.mouse_profile_target {
+        MouseProfileTarget::Focused => PointerPolicy::Focused,
+        MouseProfileTarget::Pointer
+            if cfg!(target_os = "windows")
+                && !config.bindings_vary_by_app()
+                && !thumbwheel_capture_configured(config) =>
+        {
+            PointerPolicy::OnDemand
+        }
+        MouseProfileTarget::Pointer => PointerPolicy::Continuous,
     }
 }
 

@@ -101,7 +101,10 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
             maps.bindings[&ButtonId::Back].click_action(),
             Action::PreviousDesktop
         );
-        assert_eq!(maps.pointer_target, Some(PointerTarget::Desktop));
+        assert_eq!(
+            maps.pointer_scope,
+            PointerScope::Sampled(PointerTarget::Desktop)
+        );
     }
     let plans = orch.shared.capture_plans.borrow();
     let keyboard = plans
@@ -112,7 +115,7 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
         keyboard.dispatch.bindings[&ButtonId::Back].click_action(),
         Action::Copy
     );
-    assert_eq!(keyboard.dispatch.pointer_target, None);
+    assert_eq!(keyboard.dispatch.pointer_scope, PointerScope::Focused);
     drop(plans);
     assert_eq!(orch.current_app.as_deref(), Some("browser"));
 
@@ -125,8 +128,8 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
             .hook_maps
             .read()
             .expect("hook maps")
-            .pointer_target,
-        None
+            .pointer_scope,
+        PointerScope::Focused
     );
 }
 
@@ -144,8 +147,8 @@ fn unavailable_pointer_context_does_not_fall_back_to_browser_profile() {
     });
     assert_ne!(published_back_binding(&orch), Some(Action::BrowserBack));
     assert_eq!(
-        orch.shared.hook_maps.read().expect("maps").pointer_target,
-        Some(PointerTarget::Unavailable)
+        orch.shared.hook_maps.read().expect("maps").pointer_scope,
+        PointerScope::Sampled(PointerTarget::Unavailable)
     );
 
     // Unsupported compositors explicitly retain focused profiles; a transient

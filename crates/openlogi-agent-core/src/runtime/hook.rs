@@ -22,6 +22,7 @@ use tracing::{info, warn};
 use super::scroll::ScrollInputHandle;
 use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
+use crate::watchers::pointer::PointerScope;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
 /// reads, kept behind ONE lock so a config rebuild publishes one coherent
@@ -36,7 +37,7 @@ pub struct HookMaps {
     /// gesture sources use the gesture watcher's separate map instead.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// The pointer identity that selected this snapshot, or focused policy.
-    pub(crate) pointer_target: Option<openlogi_hook::PointerTarget>,
+    pub(crate) pointer_scope: PointerScope,
     /// Device whose binding maps this snapshot contains.
     #[cfg_attr(
         not(any(target_os = "windows", test)),
@@ -251,16 +252,18 @@ fn handle_button(
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
-    let (binding, is_gesture, pointer_target) =
-        hooks.try_read().map_or((None, false, None), |maps| {
-            (
-                maps.bindings.get(&id).cloned(),
-                maps.gestures.contains_key(&id),
-                maps.pointer_target,
-            )
-        });
+    let (binding, is_gesture, pointer_scope) =
+        hooks
+            .try_read()
+            .map_or((None, false, PointerScope::Focused), |maps| {
+                (
+                    maps.bindings.get(&id).cloned(),
+                    maps.gestures.contains_key(&id),
+                    maps.pointer_scope,
+                )
+            });
     let action_target = if pressed {
-        pointer_target.map_or_else(capture_target, ActionDispatchTarget::Pointer)
+        ActionDispatchTarget::for_scope(pointer_scope, capture_target)
     } else {
         ActionDispatchTarget::Keyboard
     };
@@ -488,17 +491,17 @@ pub fn start(
                 } => {
                     #[cfg(target_os = "windows")]
                     if delta.y() == 0.0
-                        && let Some((button, action, target)) =
+                        && let Some((button, action, scope)) =
                             hooks.try_read().ok().and_then(|maps| {
                                 rebound_thumbwheel_action(&maps, delta.x())
-                                    .map(|(button, action)| (button, action, maps.pointer_target))
+                                    .map(|(button, action)| (button, action, maps.pointer_scope))
                             })
                     {
                         info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
                         return queued_event_disposition(try_queue_action(
                             &action_tx,
                             action,
-                            ActionDispatchTarget::for_pointer(target),
+                            ActionDispatchTarget::for_scope(scope, ActionDispatchTarget::capture),
                         ));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {

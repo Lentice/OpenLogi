@@ -163,3 +163,33 @@ fn windows_exe_selector_ignores_non_exe_identifiers() {
     );
     assert!(!cfg.has_app_override("2b042", "com.microsoft.VSCode"));
 }
+
+#[test]
+fn bindings_vary_by_app_only_for_an_enabled_non_empty_overlay() {
+    let mut cfg = Config::default();
+    cfg.set_binding(
+        "2b042",
+        ButtonId::Back,
+        Binding::Single(Action::BrowserBack),
+    );
+    assert!(!cfg.bindings_vary_by_app());
+
+    // An emptied app map changes no binding, even if hand-edited back in.
+    cfg.devices
+        .get_mut("2b042")
+        .expect("device entry")
+        .per_app_bindings
+        .insert("exe:code.exe".into(), BTreeMap::new());
+    assert!(!cfg.bindings_vary_by_app());
+
+    cfg.set_per_app_binding(
+        "legacy-route",
+        "exe:code.exe",
+        ButtonId::Back,
+        Some(Action::Undo),
+    );
+    assert!(cfg.bindings_vary_by_app());
+
+    cfg.set_device_enabled("legacy-route", false);
+    assert!(!cfg.bindings_vary_by_app());
+}

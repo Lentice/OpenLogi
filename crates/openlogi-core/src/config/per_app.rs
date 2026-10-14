@@ -40,6 +40,25 @@ impl Config {
         out
     }
 
+    /// Whether any enabled device stores a non-empty per-app overlay, so its
+    /// [`Self::effective_bindings`] can differ between applications. With no
+    /// such overlay every application resolves to the same bindings.
+    ///
+    /// Every enabled entry counts, including legacy keys still holding
+    /// settings and entries without kind metadata: a stray entry only costs
+    /// app-specific resolution, while a missed one would apply the wrong
+    /// profile.
+    #[must_use]
+    pub fn bindings_vary_by_app(&self) -> bool {
+        self.devices.values().any(|device| {
+            device.enabled
+                && device
+                    .per_app_bindings
+                    .values()
+                    .any(|overlay| !overlay.is_empty())
+        })
+    }
+
     /// Records a per-app override. Creates the device + app entries as
     /// needed; passing an action of `None` removes the override and prunes
     /// the empty app map.

@@ -244,7 +244,7 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
     let (dispatcher, mut owner, events) = test_dispatcher();
     let hooks = Arc::new(RwLock::new(HookMaps {
         bindings: BTreeMap::from([(ButtonId::Back, Action::PreviousDesktop.into())]),
-        pointer_target: Some(PointerTarget::Desktop),
+        pointer_scope: PointerScope::Sampled(PointerTarget::Desktop),
         ..HookMaps::default()
     }));
     let mouse = EventDevice {

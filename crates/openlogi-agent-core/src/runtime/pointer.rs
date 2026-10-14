@@ -7,11 +7,19 @@ use super::ActionDispatchTarget;
 
 impl ActionDispatchTarget {
     pub(super) fn resolve(self, action: &Action) -> Option<Self> {
-        let Self::Pointer(target) = self else {
-            return Some(self);
+        let (target, current) = match self {
+            Self::Pointer(target) | Self::AdmittedPointer(target) => {
+                (target, openlogi_hook::pointer_context().target)
+            }
+            // A one-shot action has no earlier capture: the target under the
+            // pointer when it executes is both captured and current.
+            Self::PointerOnDemand => {
+                let current = openlogi_hook::pointer_context().target;
+                (current, current)
+            }
+            Self::SafariProcess(_) | Self::Keyboard => return Some(self),
         };
-        let current = openlogi_hook::pointer_context();
-        if !pointer_action_allowed(action, target, current.target, || {
+        if !pointer_action_allowed(action, target, current, || {
             openlogi_hook::pointer_target_is_focused(target)
         }) {
             return None;

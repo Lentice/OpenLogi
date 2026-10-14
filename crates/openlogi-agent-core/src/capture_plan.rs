@@ -64,9 +64,9 @@ pub struct DispatchPlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
-    /// Pointer identity used to select these mouse bindings; absent for the
-    /// explicitly focused policy and keyboard input.
-    pub pointer_target: Option<openlogi_hook::PointerTarget>,
+    /// Pointer identity these mouse bindings were selected for; focused for
+    /// the focused-application policy and keyboard input.
+    pub pointer_scope: crate::watchers::pointer::PointerScope,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -126,6 +126,44 @@ pub(crate) fn hidpp_side_gesture_maps_for(
         .into_iter()
         .filter(|(button, _)| matches!(button, ButtonId::Back | ButtonId::Forward))
         .collect()
+}
+
+/// Whether a device resolving to `bindings` and `sensitivity` diverts its
+/// thumb wheel, which then reaches dispatch as HID++ input (and, on Windows, a
+/// rebound native wheel reaches the hook's one-shot path).
+fn wants_thumbwheel_capture(
+    bindings: &BTreeMap<ButtonId, Binding>,
+    sensitivity: ThumbwheelSensitivity,
+) -> bool {
+    sensitivity != ThumbwheelSensitivity::DEFAULT
+        || [
+            ButtonId::Thumbwheel,
+            ButtonId::ThumbwheelScrollUp,
+            ButtonId::ThumbwheelScrollDown,
+        ]
+        .iter()
+        .any(|button| {
+            bindings
+                .get(button)
+                .is_some_and(|binding| binding.click_action() != default_binding(*button))
+        })
+}
+
+/// Whether any device OpenLogi manages could capture its thumb wheel. Its
+/// accumulator and pending scroll output are canceled when the hovered window
+/// changes, which needs continuous pointer discovery to observe.
+///
+/// A device without a config entry resolves to default bindings and the
+/// app-wide sensitivity, so the app-wide default covers every such device.
+pub(crate) fn thumbwheel_capture_configured(config: &Config) -> bool {
+    config.app_settings.thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
+        || config.devices.keys().any(|key| {
+            config.device_enabled(key)
+                && wants_thumbwheel_capture(
+                    &button_bindings_for(config, Some(key), None),
+                    config.thumbwheel_sensitivity(key),
+                )
+        })
 }
 
 /// Build one device's plan from the config (per-app effective for `app`).
@@ -198,25 +236,13 @@ pub fn plan_for_device(
             })
         })
         .collect();
-    let thumbwheel_bindings_nondefault = [
-        ButtonId::Thumbwheel,
-        ButtonId::ThumbwheelScrollUp,
-        ButtonId::ThumbwheelScrollDown,
-    ]
-    .iter()
-    .any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|binding| binding.click_action() != default_binding(*button))
-    });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
             route,
             spec: CaptureSpec {
-                capture_thumbwheel: thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
-                    || thumbwheel_bindings_nondefault,
+                capture_thumbwheel: wants_thumbwheel_capture(&bindings, thumbwheel_sensitivity),
                 divert_gesture_sources: GESTURE_SOURCE_BUTTONS
                     .into_iter()
                     .filter(|(_, button)| gesture_bindings.contains_key(button))
@@ -233,7 +259,7 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
-            pointer_target: None,
+            pointer_scope: crate::watchers::pointer::PointerScope::Focused,
         },
     }
 }

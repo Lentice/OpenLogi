@@ -23,13 +23,16 @@ use super::ActionDispatchTarget;
 const EVENT_QUEUE_CAPACITY: usize = 128;
 /// Bounds how long graceful process exit waits for terminal handlers.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+/// How often the worker revalidates presses it admitted on demand, matching
+/// the continuous pointer watcher's sample period.
+const POINTER_CHECK_PERIOD: Duration = Duration::from_millis(50);
 
 /// Process-unique identity of one HID++ hardware capture incarnation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct CaptureEpoch(u64);
 
 mod worker;
-use worker::run_worker;
+use worker::{WorkerContext, run_worker};
 #[cfg(test)]
 use worker::{emit_canceled, emit_selected_long_presses, process_input, settle_due_long_presses};
 
@@ -335,6 +338,9 @@ struct ShutdownRequest {
 #[derive(Default)]
 struct ButtonState {
     active: HashMap<PressKey, ActivePress>,
+    /// Next revalidation of on-demand presses. Meaningful only while one is
+    /// active; see [`Self::pointer_check_due`].
+    pointer_check: Option<Instant>,
 }
 
 impl ButtonState {
@@ -342,11 +348,45 @@ impl ButtonState {
         self.active
             .values()
             .filter_map(|press| press.behavior.deadline())
+            .chain(self.pointer_check_due())
             .min()
     }
 
     fn press(&mut self, press: ActivePress) -> Option<ActivePress> {
+        // The first on-demand press starts the revalidation period; later ones
+        // join it, so a stream of presses cannot postpone the check.
+        if matches!(press.target, ActionDispatchTarget::AdmittedPointer(_))
+            && self.pointer_check_due().is_none()
+        {
+            self.pointer_check = Some(Instant::now() + POINTER_CHECK_PERIOD);
+        }
         self.active.insert(press.token.key.clone(), press)
+    }
+
+    /// When on-demand presses next need their target revalidated, or `None`
+    /// while no such press is active.
+    fn pointer_check_due(&self) -> Option<Instant> {
+        self.pointer_check.filter(|_| {
+            self.active
+                .values()
+                .any(|press| matches!(press.target, ActionDispatchTarget::AdmittedPointer(_)))
+        })
+    }
+
+    /// End on-demand presses whose admitted target is no longer under the
+    /// pointer, then start the next revalidation period.
+    fn revalidate_pointer(
+        &mut self,
+        current: openlogi_hook::PointerTarget,
+        now: Instant,
+    ) -> Vec<ActivePress> {
+        let ended = self
+            .active
+            .extract_if(|_, press| matches!(press.target, ActionDispatchTarget::AdmittedPointer(target) if target != current))
+            .map(|(_, press)| press)
+            .collect();
+        self.pointer_check = Some(now + POINTER_CHECK_PERIOD);
+        ended
     }
 
     fn release(&mut self, key: &PressKey) -> Option<ActivePress> {
@@ -658,7 +698,16 @@ pub(crate) struct ButtonRuntimeOwner {
 
 impl ButtonRuntimeOwner {
     pub(crate) fn spawn(
+        on_event: impl FnMut(ButtonRuntimeEvent) + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::spawn_with_pointer(on_event, || openlogi_hook::pointer_context().target)
+    }
+
+    /// Spawn with the pointer query used for on-demand admission and
+    /// revalidation, so tests can script the hovered target.
+    fn spawn_with_pointer(
         mut on_event: impl FnMut(ButtonRuntimeEvent) + Send + 'static,
+        mut pointer: impl FnMut() -> openlogi_hook::PointerTarget + Send + 'static,
     ) -> io::Result<Self> {
         let (events, event_rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         let (shutdown, shutdown_rx) = mpsc::channel();
@@ -671,7 +720,14 @@ impl ButtonRuntimeOwner {
         };
         let worker = thread::Builder::new()
             .name("openlogi-buttons".into())
-            .spawn(move || run_worker(&event_rx, &shutdown_rx, &generation, &mut on_event))?;
+            .spawn(move || {
+                run_worker(
+                    &event_rx,
+                    &shutdown_rx,
+                    WorkerContext::new(&generation, &mut pointer),
+                    &mut on_event,
+                );
+            })?;
         Ok(Self {
             input,
             shutdown,

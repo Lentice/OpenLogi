@@ -24,6 +24,7 @@ use tracing::{debug, info, warn};
 
 use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore};
 use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
+use super::pointer::PointerScope;
 use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::hardware::DeviceAccess;
@@ -151,7 +152,7 @@ fn dispatch_input(
             } else {
                 debug!(?button, "keyboard key with no binding — ignored");
             }
-            dispatcher.try_hidpp_button_down(session, button, binding, None);
+            dispatcher.try_hidpp_button_down(session, button, binding, PointerScope::Focused);
         }
         CapturedInput::ButtonUp(button) => {
             dispatcher.try_hidpp_button_up(session, button);
@@ -161,7 +162,7 @@ fn dispatch_input(
                 session,
                 button,
                 bindings.bindings.get(&button),
-                None,
+                PointerScope::Focused,
             );
         }
         CapturedInput::Gesture(..)

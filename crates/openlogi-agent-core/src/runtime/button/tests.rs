@@ -14,6 +14,11 @@ fn hook_press(id: u64, button: ButtonId) -> ActivePress {
     }
 }
 
+/// A pointer query for workers whose presses never ask for one.
+fn no_pointer() -> openlogi_hook::PointerTarget {
+    panic!("no on-demand press was queued")
+}
+
 fn long_press(short: Action, long: Action) -> Binding {
     Binding::LongPress(LongPressBinding::new(short, long))
 }
@@ -396,7 +401,12 @@ fn worker_drops_input_queued_before_generation_invalidation() {
             .expect("test receiver should stay connected");
     };
 
-    run_worker(&queued, &shutdown, &generation, &mut emit);
+    run_worker(
+        &queued,
+        &shutdown,
+        WorkerContext::new(&generation, &mut no_pointer),
+        &mut emit,
+    );
 
     assert!(
         received.try_recv().is_err(),
@@ -665,14 +675,14 @@ fn overdue_long_press_precedes_unrelated_queued_actions() {
         .expect("test queue should accept the overdue release");
     let (_shutdown, shutdown) = mpsc::channel();
     let shared_generation = AtomicU64::new(0);
-    let mut generation = 0;
+    let mut pointer = no_pointer;
+    let mut context = WorkerContext::new(&shared_generation, &mut pointer);
     let mut events = Vec::new();
 
     assert!(!settle_due_long_presses(
         &queued,
         &shutdown,
-        &shared_generation,
-        &mut generation,
+        &mut context,
         &mut state,
         None,
         &mut |event| events.push(event),
@@ -731,10 +741,15 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
     let worker_generation = Arc::clone(&generation);
     let (sent, received) = mpsc::channel();
     let worker = thread::spawn(move || {
-        run_worker(&queued, &shutdown_rx, &worker_generation, &mut |event| {
-            sent.send(event)
-                .expect("test receiver should stay connected");
-        });
+        run_worker(
+            &queued,
+            &shutdown_rx,
+            WorkerContext::new(&worker_generation, &mut no_pointer),
+            &mut |event| {
+                sent.send(event)
+                    .expect("test receiver should stay connected");
+            },
+        );
     });
 
     let wait_until = pressed_at + LONG_PRESS_THRESHOLD + Duration::from_millis(250);
@@ -951,7 +966,7 @@ fn idle_worker_shutdown_wakes_without_an_input_event() {
         worker::run_worker_observing_wait(
             &event_rx,
             &shutdown_rx,
-            &generation,
+            WorkerContext::new(&generation, &mut no_pointer),
             &mut |_| panic!("idle worker has no presses"),
             &mut |deadline| {
                 assert_eq!(deadline, None);
@@ -1035,4 +1050,249 @@ fn next_deadline_tracks_pending_presses_and_returns_to_idle() {
         &mut |_| {},
     );
     assert_eq!(state.next_deadline(), None);
+}
+
+/// A worker whose pointer query reads `pointer`, so tests move the hovered
+/// target between steps.
+fn spawn_with_scripted_pointer(
+    pointer: &Arc<std::sync::Mutex<openlogi_hook::PointerTarget>>,
+) -> (ButtonRuntimeOwner, mpsc::Receiver<ButtonRuntimeEvent>) {
+    let (sent, received) = mpsc::channel();
+    let pointer = Arc::clone(pointer);
+    let owner = ButtonRuntimeOwner::spawn_with_pointer(
+        move |event| sent.send(event).expect("receiver stays connected"),
+        move || *pointer.lock().expect("pointer lock"),
+    )
+    .expect("button worker should start");
+    (owner, received)
+}
+
+const HOVERED: openlogi_hook::PointerTarget = openlogi_hook::PointerTarget::Window {
+    process_id: 41,
+    window_id: 7,
+};
+
+#[test]
+fn on_demand_press_keeps_the_target_the_worker_admitted() {
+    let pointer = Arc::new(std::sync::Mutex::new(HOVERED));
+    let (mut owner, received) = spawn_with_scripted_pointer(&pointer);
+    let input = owner.input();
+    let token = input
+        .try_hook_down_with_target(ButtonId::Back, None, ActionDispatchTarget::PointerOnDemand)
+        .expect("down should be queued");
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("admitted press should start");
+    };
+    assert_eq!(
+        started.target(),
+        ActionDispatchTarget::AdmittedPointer(HOVERED)
+    );
+    assert!(input.try_trigger_while_pressed(&token, &Action::Copy));
+    let ButtonRuntimeEvent::Triggered { press, .. } = recv_event(&received) else {
+        panic!("gesture work should use the admitted press");
+    };
+    assert_eq!(
+        press.target(),
+        ActionDispatchTarget::AdmittedPointer(HOVERED)
+    );
+    assert!(input.try_hook_up(ButtonId::Back));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn unresolved_admission_starts_nothing_but_ends_a_press_whose_release_was_lost() {
+    let pointer = Arc::new(std::sync::Mutex::new(HOVERED));
+    let (mut owner, received) = spawn_with_scripted_pointer(&pointer);
+    let input = owner.input();
+    let binding = long_press(Action::Copy, Action::Paste);
+    let first = input
+        .try_hook_down_with_target(
+            ButtonId::Back,
+            Some(&binding),
+            ActionDispatchTarget::PointerOnDemand,
+        )
+        .expect("first down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+
+    *pointer.lock().expect("pointer lock") = openlogi_hook::PointerTarget::Unavailable;
+    input
+        .try_hook_down_with_target(
+            ButtonId::Back,
+            Some(&binding),
+            ActionDispatchTarget::PointerOnDemand,
+        )
+        .expect("repeated down should be queued");
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("the earlier press must end without its short action");
+    };
+    assert_eq!(press.token, first);
+    assert_eq!(reason, EndReason::Canceled(CancelReason::RepeatedDown));
+    // The rejected press never started, so its release runs nothing.
+    assert!(input.try_hook_up(ButtonId::Back));
+    assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn invalidation_during_the_admission_query_starts_nothing() {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn_with_pointer(
+        move |event| sent.send(event).expect("receiver stays connected"),
+        move || {
+            entered_tx.send(()).expect("test waits for the query");
+            let _ = release_rx.recv();
+            HOVERED
+        },
+    )
+    .expect("button worker should start");
+    let input = owner.input();
+    input
+        .try_hook_down_with_target(ButtonId::Back, None, ActionDispatchTarget::PointerOnDemand)
+        .expect("down should be queued");
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker should query at admission");
+    input.invalidate_all();
+    release_tx.send(()).expect("query should still be blocked");
+    assert!(
+        received.recv_timeout(Duration::from_millis(100)).is_err(),
+        "an invalidated admission must not start a lifecycle"
+    );
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn worker_ends_on_demand_presses_that_leave_the_pointer_and_spares_others() {
+    let pointer = Arc::new(std::sync::Mutex::new(HOVERED));
+    let (mut owner, received) = spawn_with_scripted_pointer(&pointer);
+    let input = owner.input();
+    let admitted = input
+        .try_hook_down_with_target(ButtonId::Back, None, ActionDispatchTarget::PointerOnDemand)
+        .expect("on-demand down should be queued");
+    let sampled = input
+        .try_hook_down_with_target(
+            ButtonId::Forward,
+            None,
+            ActionDispatchTarget::Pointer(HOVERED),
+        )
+        .expect("sampled down should be queued");
+    let keyboard = input
+        .try_hook_key_down(42, &Action::Copy, ActionDispatchTarget::Keyboard)
+        .expect("key down should be queued");
+    for _ in 0..3 {
+        assert!(matches!(
+            recv_event(&received),
+            ButtonRuntimeEvent::Started(_)
+        ));
+    }
+    // The lifecycle-driven sample check never touches admitted presses.
+    input.cancel_pointer_except(HOVERED);
+
+    *pointer.lock().expect("pointer lock") = openlogi_hook::PointerTarget::Desktop;
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("the moved on-demand press must end");
+    };
+    assert_eq!(press.token, admitted);
+    assert_eq!(reason, EndReason::Canceled(CancelReason::Invalidated));
+    assert!(input.try_hook_up(ButtonId::Forward));
+    let ButtonRuntimeEvent::Ended { press, .. } = recv_event(&received) else {
+        panic!("the sampled press is owned by lifecycle cancellation");
+    };
+    assert_eq!(press.token, sampled);
+    assert!(input.try_hook_key_up(42));
+    let ButtonRuntimeEvent::Ended { press, .. } = recv_event(&received) else {
+        panic!("keyboard holds are not pointer-scoped");
+    };
+    assert_eq!(press.token, keyboard);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn revalidation_wins_over_a_long_press_that_became_due_while_the_handler_blocked() {
+    let pointer = Arc::new(std::sync::Mutex::new(HOVERED));
+    let scripted = Arc::clone(&pointer);
+    let (sent, received) = mpsc::channel();
+    let (resume, blocked) = mpsc::sync_channel(0);
+    let mut owner = ButtonRuntimeOwner::spawn_with_pointer(
+        move |event| {
+            let started = matches!(&event, ButtonRuntimeEvent::Started(_));
+            sent.send(event).expect("receiver stays connected");
+            if started {
+                blocked.recv().expect("test resumes the handler");
+            }
+        },
+        move || *scripted.lock().expect("pointer lock"),
+    )
+    .expect("button worker should start");
+    let input = owner.input();
+    let binding = long_press(Action::Copy, Action::Paste);
+    input
+        .try_hook_down_with_target(
+            ButtonId::Back,
+            Some(&binding),
+            ActionDispatchTarget::PointerOnDemand,
+        )
+        .expect("down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    *pointer.lock().expect("pointer lock") = openlogi_hook::PointerTarget::Desktop;
+    thread::sleep(LONG_PRESS_THRESHOLD + Duration::from_millis(20));
+    resume.send(()).expect("worker should still be blocked");
+
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::Invalidated),
+            ..
+        }
+    ));
+    assert!(received.recv_timeout(Duration::from_millis(30)).is_err());
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn pointer_revalidation_deadline_is_shared_and_returns_to_idle() {
+    let admitted = |id, button| ActivePress {
+        target: ActionDispatchTarget::AdmittedPointer(HOVERED),
+        ..hook_press(id, button)
+    };
+    let mut state = ButtonState::default();
+    state.press(hook_press(1, ButtonId::MiddleClick));
+    assert_eq!(state.next_deadline(), None);
+
+    let first = admitted(2, ButtonId::Back);
+    state.press(first.clone());
+    let due = state
+        .next_deadline()
+        .expect("an admitted press is revalidated");
+    state.press(admitted(3, ButtonId::Forward));
+    assert_eq!(
+        state.next_deadline(),
+        Some(due),
+        "a later press joins the pending check instead of postponing it"
+    );
+
+    let ended = state.revalidate_pointer(openlogi_hook::PointerTarget::Desktop, due);
+    assert_eq!(ended.len(), 2);
+    assert_eq!(state.next_deadline(), None, "no admitted press, no timer");
+
+    state.press(first);
+    assert!(
+        state.next_deadline().is_some(),
+        "a new press starts a period"
+    );
 }

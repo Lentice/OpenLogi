@@ -23,6 +23,7 @@ use self::button::{
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
+use crate::watchers::pointer::PointerScope;
 use crate::{DpiCycleState, DpiCycles};
 
 /// Application identity captured with a physical press and retained through
@@ -36,6 +37,12 @@ pub(crate) enum ActionDispatchTarget {
     /// The pointer context that selected the binding. Validated off the tap
     /// before output, never substituted with an unrelated foreground window.
     Pointer(openlogi_hook::PointerTarget),
+    /// App-independent bindings: the button worker queries the target when it
+    /// admits the press; a one-shot action queries it when it executes.
+    PointerOnDemand,
+    /// The target the button worker queried when admitting the press. The
+    /// worker, not the pointer watcher, revalidates it while the press lasts.
+    AdmittedPointer(openlogi_hook::PointerTarget),
 }
 
 impl ActionDispatchTarget {
@@ -43,8 +50,14 @@ impl ActionDispatchTarget {
         openlogi_hook::frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
     }
 
-    fn for_pointer(target: Option<openlogi_hook::PointerTarget>) -> Self {
-        target.map_or_else(Self::capture, Self::Pointer)
+    /// The target for input resolved against `scope`; `focused` captures the
+    /// focused-application target when no pointer identity applies.
+    fn for_scope(scope: PointerScope, focused: impl FnOnce() -> Self) -> Self {
+        match scope {
+            PointerScope::Focused => focused(),
+            PointerScope::Sampled(target) => Self::Pointer(target),
+            PointerScope::OnDemand => Self::PointerOnDemand,
+        }
     }
 }
 /// Held output owned by accepted press capabilities rather than by a capture
@@ -298,12 +311,12 @@ impl ActionDispatcher {
         &self,
         action: &Action,
         device_key: Option<&str>,
-        target: Option<openlogi_hook::PointerTarget>,
+        scope: PointerScope,
     ) {
         self.executor.dispatch_to(
             action,
             device_key,
-            ActionDispatchTarget::for_pointer(target),
+            ActionDispatchTarget::for_scope(scope, ActionDispatchTarget::capture),
         );
     }
 
@@ -365,13 +378,13 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
-        pointer_target: Option<openlogi_hook::PointerTarget>,
+        scope: PointerScope,
     ) -> Option<PressToken> {
         self.buttons.try_hidpp_down(
             session,
             button,
             binding,
-            ActionDispatchTarget::for_pointer(pointer_target),
+            ActionDispatchTarget::for_scope(scope, ActionDispatchTarget::capture),
         )
     }
 
@@ -387,13 +400,13 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
-        pointer_target: Option<openlogi_hook::PointerTarget>,
+        scope: PointerScope,
     ) {
         self.buttons.try_hidpp_pulse(
             session,
             button,
             binding,
-            ActionDispatchTarget::for_pointer(pointer_target),
+            ActionDispatchTarget::for_scope(scope, ActionDispatchTarget::capture),
         );
     }
 
@@ -409,7 +422,8 @@ impl ActionDispatcher {
         self.buttons.invalidate_all();
     }
 
-    /// End only pointer-scoped presses when the hovered window changes.
+    /// End only sampled pointer presses when the hovered window changes.
+    /// Presses admitted on demand are revalidated by the button worker.
     /// Keyboard and explicitly focus-scoped holds keep their own lifecycles.
     /// Preserve presses already admitted against the newly published target.
     pub fn cancel_pointer_buttons_except(&self, current: openlogi_hook::PointerTarget) {
@@ -503,7 +517,9 @@ fn dispatch_browser_navigation(
             keyboard();
             true
         }
-        ActionDispatchTarget::Pointer(_) => {
+        ActionDispatchTarget::Pointer(_)
+        | ActionDispatchTarget::PointerOnDemand
+        | ActionDispatchTarget::AdmittedPointer(_) => {
             unreachable!("pointer targets resolve before navigation")
         }
     }

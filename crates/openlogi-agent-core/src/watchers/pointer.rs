@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use openlogi_core::config::MouseProfileTarget;
 use openlogi_hook::{PointerContext, PointerTarget};
 use tokio::sync::watch;
 use tracing::warn;
@@ -10,11 +9,36 @@ use tracing::warn;
 /// Pause between the end of one pointer-mode query and the next.
 const SAMPLE_PERIOD: Duration = Duration::from_millis(50);
 
+/// How mouse bindings learn the pointer's application and window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerPolicy {
+    /// Mouse profiles follow the focused application; no pointer queries.
+    Focused,
+    /// Bindings depend on the hovered application: sample it continuously.
+    Continuous,
+    /// Bindings are the same in every application: no idle sampling. The
+    /// button worker queries the pointer when it admits a press and while
+    /// such a press is held.
+    OnDemand,
+}
+
+/// The pointer identity a binding snapshot was resolved against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PointerScope {
+    /// Focused-application profiles, or no pointer backend.
+    #[default]
+    Focused,
+    /// Bindings selected by this sampled pointer target.
+    Sampled(PointerTarget),
+    /// App-independent bindings; the press target is queried at admission.
+    OnDemand,
+}
+
 /// Config-owned identity of a pointer discovery session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiscoveryDemand {
-    /// Selection policy for mouse application profiles.
-    pub mode: MouseProfileTarget,
+    /// How mouse profiles use the pointer.
+    pub policy: PointerPolicy,
     /// Changes whenever the policy changes, including rapid round trips.
     pub generation: u64,
 }
@@ -28,7 +52,7 @@ pub struct Observation {
     pub context: PointerContext,
 }
 
-/// Observe pointer windows only while pointer-selected profiles are enabled.
+/// Observe pointer windows only under [`PointerPolicy::Continuous`].
 /// Queries stay off input callbacks; suspended discovery keeps its channel live.
 #[must_use]
 pub fn spawn(demand: watch::Receiver<DiscoveryDemand>) -> watch::Receiver<Observation> {
@@ -70,7 +94,8 @@ fn spawn_with_wait_observer(
     let spawned = openlogi_core::worker::spawn("openlogi-pointer-context", move |runtime| {
         loop {
             let session = *demand.borrow_and_update();
-            if session.mode == MouseProfileTarget::Pointer {
+            let sampling = session.policy == PointerPolicy::Continuous;
+            if sampling {
                 let context = query();
                 // The orchestrator checks this identity again under its lock:
                 // a reload can happen after this check or before consumption.
@@ -89,7 +114,7 @@ fn spawn_with_wait_observer(
                 }
             }
             waiting(session);
-            let finished = if session.mode == MouseProfileTarget::Pointer {
+            let finished = if sampling {
                 // A Tokio timer on this current-thread runtime wakes Windows
                 // about twice per period; a plain sleep wakes once. Demand
                 // is reread before the next query, so a transition or
@@ -123,7 +148,7 @@ mod tests {
     #[tokio::test]
     async fn focused_discovery_skips_queries_and_round_trip_discards_inflight_sample() {
         let focused = DiscoveryDemand {
-            mode: MouseProfileTarget::Focused,
+            policy: PointerPolicy::Focused,
             generation: 0,
         };
         let (demand_tx, demand_rx) = watch::channel(focused);
@@ -165,18 +190,18 @@ mod tests {
             PointerTarget::Unavailable
         );
         let first = DiscoveryDemand {
-            mode: MouseProfileTarget::Pointer,
+            policy: PointerPolicy::Continuous,
             generation: 1,
         };
         demand_tx.send_replace(first);
         assert_eq!(queried_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
         // The first native query is still blocked while both transitions occur.
         demand_tx.send_replace(DiscoveryDemand {
-            mode: MouseProfileTarget::Focused,
+            policy: PointerPolicy::Focused,
             generation: 2,
         });
         let resumed = DiscoveryDemand {
-            mode: MouseProfileTarget::Pointer,
+            policy: PointerPolicy::Continuous,
             generation: 3,
         };
         demand_tx.send_replace(resumed);
@@ -206,10 +231,52 @@ mod tests {
     }
 
     #[test]
+    fn on_demand_discovery_waits_without_queries_until_continuous() {
+        let on_demand = DiscoveryDemand {
+            policy: PointerPolicy::OnDemand,
+            generation: 0,
+        };
+        let (demand_tx, demand_rx) = watch::channel(on_demand);
+        let (queried_tx, queried_rx) = mpsc::channel();
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let observations = spawn_with_wait_observer(
+            demand_rx,
+            true,
+            move || {
+                let _ = queried_tx.send(());
+                PointerContext {
+                    app: None,
+                    target: PointerTarget::Desktop,
+                }
+            },
+            move |session| {
+                let _ = waiting_tx.send(session);
+            },
+        );
+        assert_eq!(
+            waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            on_demand
+        );
+        assert_eq!(queried_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        assert!(
+            !observations.has_changed().unwrap(),
+            "the channel stays live"
+        );
+
+        demand_tx.send_replace(DiscoveryDemand {
+            policy: PointerPolicy::Continuous,
+            generation: 1,
+        });
+        queried_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(observations);
+        drop(demand_tx);
+    }
+
+    #[test]
     fn pointer_discovery_stops_when_output_or_demand_closes() {
         for drop_output in [true, false] {
             let (demand_tx, demand_rx) = watch::channel(DiscoveryDemand {
-                mode: MouseProfileTarget::Pointer,
+                policy: PointerPolicy::Continuous,
                 generation: 0,
             });
             let (queried_tx, queried_rx) = mpsc::channel();
@@ -246,7 +313,7 @@ mod tests {
     #[test]
     fn unsupported_discovery_needs_no_ambient_runtime_or_native_queries() {
         let (_, demand) = watch::channel(DiscoveryDemand {
-            mode: MouseProfileTarget::Focused,
+            policy: PointerPolicy::Focused,
             generation: 0,
         });
         let observed = spawn_with_query(demand, false, || panic!("unsupported query must not run"));
