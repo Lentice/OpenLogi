@@ -34,10 +34,9 @@ use tracing::{info, warn};
 
 mod relaunch;
 
-#[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) use relaunch::replace_process;
 #[cfg(target_os = "macos")]
-pub(crate) use relaunch::{schedule, schedule_after_input_monitoring_grant};
+pub(crate) use relaunch::schedule_after_input_monitoring_grant;
+pub(crate) use relaunch::{OsRelaunch, Relaunch};
 
 use crate::shutdown::{ShutdownRequest, ShutdownRequestSender};
 
@@ -211,8 +210,8 @@ pub fn spawn(requests: ShutdownRequestSender) {
                             return;
                         }
                         // A successful replacement ends this process. The only
-                        // reply means scheduling or exec failed and this old
-                        // image safely resumed its watcher fleet.
+                        // reply comes from the lifecycle's watcher fleet, which
+                        // sends it once this image's fleet is serving again.
                         if retry_rx.blocking_recv().is_err() {
                             return;
                         }

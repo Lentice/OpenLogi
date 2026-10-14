@@ -26,8 +26,9 @@ pub(crate) enum ShutdownRequest {
     /// The executable was replaced and the process should become `path`.
     Restart {
         path: PathBuf,
-        /// Sent only when scheduling or `exec` failed and the binary watcher
-        /// should resume observing for another settled replacement.
+        /// Sent only by the lifecycle's watcher fleet, once this image is
+        /// serving again (unclean teardown, failed relaunch, or a request it
+        /// could not drain for), so the binary watcher resumes observing.
         retry: oneshot::Sender<()>,
     },
 }

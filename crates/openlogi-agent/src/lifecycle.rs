@@ -41,7 +41,7 @@ use tracing::{debug, info, warn};
 #[cfg(target_os = "macos")]
 use openlogi_ipc::ClientKind;
 
-use self::transition::{Replacement, WatcherFleet};
+use self::transition::{Drained, Replacement, ReplacementOutcome, WatcherFleet};
 use crate::shutdown::{self, ShutdownRequest, ShutdownRequests, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
 use crate::{autostart, overlay, server};
@@ -91,6 +91,9 @@ struct Booted {
     /// The sole receiver for tray, uninstall, and replacement requests. It
     /// moves through the typestates with process-resource ownership.
     shutdown_requests: ShutdownRequests,
+    /// Inactive until arming starts it; the sole owner of every process
+    /// replacement, including one requested while dormant.
+    hidpp_watchers: WatcherFleet,
     /// The hook kill-switch, startup-only on purpose: flipping it requires
     /// an agent restart, which the config docs state.
     capture_mouse_events: bool,
@@ -116,6 +119,7 @@ impl Booted {
             core,
             signals: ShutdownSignals::install(),
             shutdown_requests,
+            hidpp_watchers: WatcherFleet::new(),
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             launch_at_login,
@@ -180,10 +184,8 @@ impl Booted {
                     }
                     ShutdownRequest::Restart { path, retry } => {
                         info!(path = %path.display(), "executable changed while dormant — scheduling relaunch");
-                        if let Err(error) = crate::binary_watch::schedule(&path) {
-                            warn!(%error, "could not schedule updated agent relaunch — keeping the current image and retrying");
-                            let _ = retry.send(());
-                        } else {
+                        let outcome = self.hidpp_watchers.relaunch_unarmed(Replacement::new(path, retry));
+                        if let ReplacementOutcome::Leaving(_handover) = outcome {
                             return None;
                         }
                     }
@@ -213,6 +215,7 @@ impl Wanted {
             core,
             signals,
             shutdown_requests,
+            hidpp_watchers,
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             armed_tx,
@@ -247,7 +250,7 @@ impl Wanted {
                 ring_haptics,
                 signals,
                 shutdown_requests,
-                hidpp_watchers: WatcherFleet::Inactive,
+                hidpp_watchers,
                 hook: None,
                 capture_mouse_events,
             },
@@ -293,7 +296,7 @@ impl Armed {
         }
 
         // HID++ watchers need no Accessibility — start them up front.
-        running.restart_hidpp_watchers();
+        running.start_hidpp_watchers();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
 
         info!("openlogi-agent started");
@@ -311,8 +314,8 @@ impl Armed {
                 Some(request) = running.shutdown_requests.recv() => {
                     running.handle_shutdown_request(request).await;
                 }
-                (request, stopped) = running.hidpp_watchers.replacement_ready() => {
-                    running.complete_replacement(request, stopped).await;
+                drained = running.hidpp_watchers.drained() => {
+                    running.complete_replacement(drained).await;
                 }
                 Some(event) = watchers.next() => {
                     running.apply_watcher(event, &inventory_refresh).await;
@@ -523,55 +526,29 @@ impl Running {
                 self.shut_down("the app was uninstalled", None).await;
             }
             ShutdownRequest::Restart { path, retry } => {
-                self.hidpp_watchers
-                    .begin_replacement(Replacement { path, retry });
+                self.hidpp_watchers.begin(Replacement::new(path, retry));
             }
         }
     }
 
-    /// Called only after the old fleet has acknowledged teardown. Failed
-    /// teardown resumes the current image instead of replacing it.
-    async fn complete_replacement(&mut self, request: Replacement, stopped: bool) {
-        if !stopped {
-            warn!("HID++ teardown was unclean — refusing replacement and retrying");
-            self.restart_hidpp_watchers();
-            let _ = request.retry.send(());
-            return;
+    /// Called only after the old fleet finished teardown. The fleet settles
+    /// the outcome; this only performs the exit it may demand. On Linux a
+    /// successful `exec` never returns here, so only `Resumed` arrives.
+    async fn complete_replacement(&mut self, drained: Drained) {
+        let outcome = self.hidpp_watchers.complete(drained, || {
+            startup::spawn_hidpp_watchers(&self.shared, &self.inputs)
+        });
+        if let ReplacementOutcome::Leaving(_handover) = outcome {
+            // The drained fleet is already inactive, so the exit below
+            // releases only the overlay and hook; the successor finds the
+            // armed session.
+            self.hand_over("binary update").await;
         }
-        self.restart(request).await;
     }
 
-    fn restart_hidpp_watchers(&mut self) {
-        self.hidpp_watchers =
-            WatcherFleet::Running(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[expect(
-        clippy::unused_async,
-        reason = "the platform counterparts await overlay teardown"
-    )]
-    async fn restart(&mut self, Replacement { path, retry }: Replacement) {
-        let error = crate::binary_watch::replace_process(&path);
-        warn!(%error, path = %path.display(), "exec of the updated agent failed — restoring the current image and retrying");
-        self.restart_hidpp_watchers();
-        let _ = retry.send(());
-    }
-
-    #[cfg(target_os = "macos")]
-    async fn restart(&mut self, Replacement { path, retry }: Replacement) {
-        if let Err(error) = crate::binary_watch::schedule(&path) {
-            warn!(%error, "could not schedule updated agent relaunch — keeping the current image and retrying");
-            self.restart_hidpp_watchers();
-            let _ = retry.send(());
-            return;
-        }
-        self.exit_after_replacement_teardown("binary update").await;
-    }
-
-    #[cfg(not(unix))]
-    async fn restart(&mut self, _request: Replacement) {
-        self.exit_after_replacement_teardown("binary update").await;
+    fn start_hidpp_watchers(&mut self) {
+        self.hidpp_watchers
+            .start(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
     }
 
     /// Leave for good: nobody wants the agent until asked again, so the next
@@ -588,7 +565,6 @@ impl Running {
 
     /// Leave for a successor that is already scheduled and must start armed:
     /// the armed-session record stays for it to find.
-    #[cfg(target_os = "macos")]
     async fn hand_over(&mut self, reason: &str) -> ! {
         self.leave(reason, None).await
     }
@@ -602,21 +578,8 @@ impl Running {
         if let Some(overlay) = self.overlay.take() {
             overlay.stop().await;
         }
-        std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
-            .stop_for_exit()
-            .await;
+        self.hidpp_watchers.stop_for_exit().await;
         shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, tray_guard)
-    }
-
-    /// End after [`Self::complete_replacement`] resolved firmware
-    /// ownership, so a successor starts from native device state. A handover
-    /// like [`Self::hand_over`]: the successor finds the armed session.
-    #[cfg(any(target_os = "macos", not(unix)))]
-    async fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
-        if let Some(overlay) = self.overlay.take() {
-            overlay.stop().await;
-        }
-        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)
     }
 }
 
