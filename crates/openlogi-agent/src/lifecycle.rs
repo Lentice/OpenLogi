@@ -371,17 +371,12 @@ impl Running {
             }
             WatcherEvent::App(app) => self.apply_foreground(app).await,
             WatcherEvent::Pointer(observation) => {
-                let current = observation.context.target;
-                if self
+                let invalidation = self
                     .orchestrator
                     .lock()
                     .await
-                    .set_pointer_observation(observation)
-                {
-                    self.inputs
-                        .dispatcher
-                        .cancel_pointer_buttons_except(current);
-                }
+                    .set_pointer_observation(observation);
+                self.inputs.dispatcher.invalidate(invalidation);
             }
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
@@ -418,9 +413,11 @@ impl Running {
                 hid_open_failures,
             } => {
                 let mut orchestrator = self.orchestrator.lock().await;
-                orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+                let invalidation =
+                    orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
                 drop(orchestrator);
+                self.inputs.dispatcher.invalidate(invalidation);
                 if confirm_settings {
                     refresh.request_settings_confirmation();
                 }
@@ -442,18 +439,13 @@ impl Running {
     /// Publish one foreground-app change and cancel button lifecycles whose
     /// bindings were resolved against the previous app profile.
     async fn apply_foreground(&self, app: ForegroundUpdate) {
-        if self.orchestrator.lock().await.set_current_app(app) {
-            self.inputs.dispatcher.cancel_all_buttons();
-        }
+        let invalidation = self.orchestrator.lock().await.set_current_app(app);
+        self.inputs.dispatcher.invalidate(invalidation);
     }
 
     async fn apply_pointer_context(&self, context: openlogi_hook::PointerContext) {
-        let current = context.target;
-        if self.orchestrator.lock().await.set_pointer_context(context) {
-            self.inputs
-                .dispatcher
-                .cancel_pointer_buttons_except(current);
-        }
+        let invalidation = self.orchestrator.lock().await.set_pointer_context(context);
+        self.inputs.dispatcher.invalidate(invalidation);
     }
 
     async fn begin_action_ring(&self, device_key: Option<&str>) {

@@ -40,6 +40,7 @@ use crate::hardware::{
 };
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
+use crate::runtime::ButtonInvalidation;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
@@ -716,12 +717,16 @@ impl Orchestrator {
     /// DPI-cycle index, so running it on every steady reconciliation
     /// would snap DPI back to `preset[0]` (and burn three `RwLock` writes)
     /// for nothing.
+    ///
+    /// Returns [`ButtonInvalidation::Hooks`] when the OS hook's selected
+    /// device changed: held OS-hook presses resolved their gestures against
+    /// the previous device's maps.
     pub fn refresh_inventory(
         &mut self,
         inventories: &[DeviceInventory],
         standalone: &[StandaloneDevice],
         hid_open_failures: bool,
-    ) {
+    ) -> ButtonInvalidation {
         // Even an empty snapshot is a *completed* enumeration — the watcher
         // skips failed ticks — so the device set is now known either way (and
         // a recovered backend upgrades `Unavailable` back to live data).
@@ -773,11 +778,17 @@ impl Orchestrator {
             // also lands through this republish.
             self.devices = devices;
             self.publish_device_runtime();
-            return;
+            return ButtonInvalidation::None;
         }
+        let previous_key = self.current_key().map(str::to_owned);
         self.devices = devices;
         self.current = next_current;
         self.rebuild();
+        if self.current_key() == previous_key.as_deref() {
+            ButtonInvalidation::None
+        } else {
+            ButtonInvalidation::Hooks
+        }
     }
 
     /// Whether volatile-setting writes still need a delayed inventory pass to
@@ -1051,42 +1062,45 @@ impl Orchestrator {
     /// and republishing for it could restart a capture session (a plan's
     /// divert set is part of its identity) over nothing. The observable cell
     /// still gets the whole value — it dedupes on its own, and its recent list
-    /// is the only source a client has for these identifiers. Returns whether
-    /// the effective app identifier changed and active button lifecycles must
-    /// be canceled.
-    pub fn set_current_app(&mut self, app: Option<ForegroundApp>) -> bool {
+    /// is the only source a client has for these identifiers. Returns the
+    /// presses resolved against the previous app, when the identifier changed.
+    pub fn set_current_app(&mut self, app: Option<ForegroundApp>) -> ButtonInvalidation {
         let id = app.as_ref().map(|app| app.id.clone());
         self.observable.set_foreground(app);
         if id == self.current_app {
-            return false;
+            return ButtonInvalidation::None;
         }
         self.current_app = id;
         self.publish_hook_maps(self.hook_maps_for(self.current_key()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
-        true
+        ButtonInvalidation::Focused
     }
 
     /// Apply a discovery result only if it belongs to the current config session.
     pub fn set_pointer_observation(
         &mut self,
         observation: crate::watchers::pointer::Observation,
-    ) -> bool {
+    ) -> ButtonInvalidation {
         if observation.context.target != openlogi_hook::PointerTarget::Unsupported
             && observation.demand != *self.pointer_discovery_tx.borrow()
         {
-            return false;
+            return ButtonInvalidation::None;
         }
         self.set_pointer_context(observation.context)
     }
 
     /// Publish a pointer-window change separately from keyboard focus. The
     /// target travels in the same snapshot as its effective mouse bindings.
-    /// Returns whether pointer-scoped presses must be canceled.
-    pub fn set_pointer_context(&mut self, context: openlogi_hook::PointerContext) -> bool {
+    /// Returns the sampled presses admitted against any other target, when
+    /// the pointer scope changed.
+    pub fn set_pointer_context(
+        &mut self,
+        context: openlogi_hook::PointerContext,
+    ) -> ButtonInvalidation {
         if self.pointer_context == context {
-            return false;
+            return ButtonInvalidation::None;
         }
         let (previous_app, previous_scope) = self.mouse_context();
         let previous_app = previous_app.map(str::to_owned);
@@ -1094,11 +1108,15 @@ impl Orchestrator {
         let (app, scope) = self.mouse_context();
         // Focused and on-demand bindings ignore the sampled context.
         if app == previous_app.as_deref() && scope == previous_scope {
-            return false;
+            return ButtonInvalidation::None;
         }
         self.publish_hook_maps(self.hook_maps_for(self.current_key()));
         self.publish_capture_plans();
-        scope != previous_scope
+        if scope == previous_scope {
+            ButtonInvalidation::None
+        } else {
+            ButtonInvalidation::PointerExcept(self.pointer_context.target)
+        }
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.

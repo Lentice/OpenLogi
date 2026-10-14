@@ -325,7 +325,8 @@ enum ButtonCommand {
     Input { generation: u64, input: ButtonInput },
     CancelStalePress(PressToken),
     CancelSource(ButtonSource),
-    CancelHooks,
+    CancelHooks(CancelReason),
+    CancelFocused,
     CancelPointerExcept(openlogi_hook::PointerTarget),
     Wake,
 }
@@ -414,6 +415,13 @@ impl ButtonState {
 
     fn cancel_all(&mut self) -> Vec<ActivePress> {
         self.active.drain().map(|(_, press)| press).collect()
+    }
+
+    fn cancel_focused(&mut self) -> Vec<ActivePress> {
+        self.active
+            .extract_if(|_, press| press.target.follows_focus())
+            .map(|(_, press)| press)
+            .collect()
     }
 
     fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
@@ -538,7 +546,17 @@ impl ButtonInputHandle {
     }
 
     pub(crate) fn cancel_hooks(&self) {
-        self.try_command(ButtonCommand::CancelHooks);
+        self.try_command(ButtonCommand::CancelHooks(CancelReason::SourceEnded));
+    }
+
+    /// End OS-hook presses resolved against a hook map that was replaced.
+    pub(crate) fn invalidate_hooks(&self) {
+        self.try_command(ButtonCommand::CancelHooks(CancelReason::Invalidated));
+    }
+
+    /// End presses resolved against a focused application that changed.
+    pub(crate) fn invalidate_focused(&self) {
+        self.try_command(ButtonCommand::CancelFocused);
     }
 
     pub(crate) fn cancel_pointer_except(&self, current: openlogi_hook::PointerTarget) {
@@ -705,7 +723,7 @@ impl ButtonRuntimeOwner {
 
     /// Spawn with the pointer query used for on-demand admission and
     /// revalidation, so tests can script the hovered target.
-    fn spawn_with_pointer(
+    pub(super) fn spawn_with_pointer(
         mut on_event: impl FnMut(ButtonRuntimeEvent) + Send + 'static,
         mut pointer: impl FnMut() -> openlogi_hook::PointerTarget + Send + 'static,
     ) -> io::Result<Self> {

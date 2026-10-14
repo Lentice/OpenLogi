@@ -4,6 +4,8 @@ use super::*;
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
 use openlogi_core::config::KeyModifiers;
 
+mod profile_transitions;
+
 fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
 }
@@ -33,12 +35,27 @@ fn test_dispatcher() -> (
     super::super::button::ButtonRuntimeOwner,
     mpsc::Receiver<super::super::button::ButtonRuntimeEvent>,
 ) {
+    test_dispatcher_with_pointer(|| openlogi_hook::PointerTarget::Unavailable)
+}
+
+/// A real dispatcher and button worker whose on-demand pointer query is
+/// scripted, reporting every lifecycle event to the returned receiver.
+fn test_dispatcher_with_pointer(
+    pointer: impl FnMut() -> openlogi_hook::PointerTarget + Send + 'static,
+) -> (
+    ActionDispatcher,
+    super::super::button::ButtonRuntimeOwner,
+    mpsc::Receiver<super::super::button::ButtonRuntimeEvent>,
+) {
     let (events, received) = mpsc::channel();
-    let owner = super::super::button::ButtonRuntimeOwner::spawn(move |event| {
-        events
-            .send(event)
-            .expect("test receiver should stay connected");
-    })
+    let owner = super::super::button::ButtonRuntimeOwner::spawn_with_pointer(
+        move |event| {
+            events
+                .send(event)
+                .expect("test receiver should stay connected");
+        },
+        pointer,
+    )
     .expect("button worker should start");
     let (action_ring, _ring_events) = tokio::sync::mpsc::unbounded_channel();
     let dispatcher = ActionDispatcher {

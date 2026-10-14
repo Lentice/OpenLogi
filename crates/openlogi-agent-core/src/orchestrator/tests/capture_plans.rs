@@ -85,15 +85,21 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
         process_id: 41,
         window_id: 7,
     };
-    assert!(orch.set_pointer_context(PointerContext {
-        app: Some(ForegroundApp::unnamed("browser".into())),
-        target: window,
-    }));
+    assert_eq!(
+        orch.set_pointer_context(PointerContext {
+            app: Some(ForegroundApp::unnamed("browser".into())),
+            target: window,
+        }),
+        ButtonInvalidation::PointerExcept(window)
+    );
     assert_eq!(published_back_binding(&orch), Some(Action::BrowserBack));
-    assert!(orch.set_pointer_context(PointerContext {
-        app: None,
-        target: PointerTarget::Desktop
-    }));
+    assert_eq!(
+        orch.set_pointer_context(PointerContext {
+            app: None,
+            target: PointerTarget::Desktop
+        }),
+        ButtonInvalidation::PointerExcept(PointerTarget::Desktop)
+    );
     assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
     {
         let maps = orch.shared.hook_maps.read().expect("hook maps");

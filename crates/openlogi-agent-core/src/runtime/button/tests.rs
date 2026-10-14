@@ -113,6 +113,58 @@ fn hook_cancellation_leaves_hidpp_presses_active() {
 }
 
 #[test]
+fn focus_cancellation_ends_exactly_the_focus_resolved_presses() {
+    let window = openlogi_hook::PointerTarget::Window {
+        process_id: 41,
+        window_id: 7,
+    };
+    let presses = [
+        (ButtonId::Back, ActionDispatchTarget::Keyboard, true),
+        (
+            ButtonId::Forward,
+            ActionDispatchTarget::SafariProcess(417),
+            true,
+        ),
+        (
+            ButtonId::MiddleClick,
+            ActionDispatchTarget::Pointer(window),
+            false,
+        ),
+        (
+            ButtonId::GestureButton,
+            ActionDispatchTarget::PointerOnDemand,
+            false,
+        ),
+        (
+            ButtonId::Thumbwheel,
+            ActionDispatchTarget::AdmittedPointer(window),
+            false,
+        ),
+    ];
+    let mut state = ButtonState::default();
+    let mut expected = Vec::new();
+    for (id, (button, target, follows_focus)) in (1..).zip(presses) {
+        let press = ActivePress {
+            target,
+            ..hook_press(id, button)
+        };
+        if follows_focus {
+            expected.push(press.token.clone());
+        }
+        state.press(press);
+    }
+
+    let mut canceled: Vec<_> = state
+        .cancel_focused()
+        .into_iter()
+        .map(|press| press.token)
+        .collect();
+    canceled.sort_by_key(|token| token.id.0);
+    assert_eq!(canceled, expected);
+    assert_eq!(state.active.len(), 3, "pointer-resolved presses survive");
+}
+
+#[test]
 fn stale_token_cannot_trigger_after_same_key_repress() {
     let (sent, received) = mpsc::channel();
     let mut owner = ButtonRuntimeOwner::spawn(move |event| {

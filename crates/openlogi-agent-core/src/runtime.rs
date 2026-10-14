@@ -59,6 +59,34 @@ impl ActionDispatchTarget {
             PointerScope::OnDemand => Self::PointerOnDemand,
         }
     }
+
+    /// Whether the press's binding was resolved against the focused
+    /// application rather than against the pointer.
+    fn follows_focus(self) -> bool {
+        match self {
+            Self::SafariProcess(_) | Self::Keyboard => true,
+            Self::Pointer(_) | Self::PointerOnDemand | Self::AdmittedPointer(_) => false,
+        }
+    }
+}
+
+/// Held button lifecycles one binding-context transition made stale. The
+/// orchestrator, which owns the context, returns this from each transition;
+/// [`ActionDispatcher::invalidate`] applies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonInvalidation {
+    /// No held press was resolved against the changed context.
+    None,
+    /// The focused application changed: end presses resolved against it.
+    /// Pointer-scoped presses follow the hovered window instead and survive.
+    Focused,
+    /// The OS hook's selected device changed: end OS-hook presses, whose
+    /// gesture click and swipes resolve against the selected device's maps.
+    /// HID++ presses belong to their own device's capture session.
+    Hooks,
+    /// The sampled pointer scope changed: end sampled presses admitted against
+    /// any other target. On-demand presses are revalidated by the worker.
+    PointerExcept(openlogi_hook::PointerTarget),
 }
 /// Held output owned by accepted press capabilities rather than by a capture
 /// backend. Because every [`PressToken`] has exactly one terminal event, this
@@ -422,12 +450,17 @@ impl ActionDispatcher {
         self.buttons.invalidate_all();
     }
 
-    /// End only sampled pointer presses when the hovered window changes.
-    /// Presses admitted on demand are revalidated by the button worker.
-    /// Keyboard and explicitly focus-scoped holds keep their own lifecycles.
-    /// Preserve presses already admitted against the newly published target.
-    pub fn cancel_pointer_buttons_except(&self, current: openlogi_hook::PointerTarget) {
-        self.buttons.cancel_pointer_except(current);
+    /// End exactly the held lifecycles a binding-context transition made
+    /// stale; every other press keeps its lifecycle.
+    pub fn invalidate(&self, invalidation: ButtonInvalidation) {
+        match invalidation {
+            ButtonInvalidation::None => {}
+            ButtonInvalidation::Focused => self.buttons.invalidate_focused(),
+            ButtonInvalidation::Hooks => self.buttons.invalidate_hooks(),
+            ButtonInvalidation::PointerExcept(current) => {
+                self.buttons.cancel_pointer_except(current);
+            }
+        }
     }
 
     /// Cancel only presses owned by an OS-hook callback. HID++ capture does not

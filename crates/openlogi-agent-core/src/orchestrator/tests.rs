@@ -6,6 +6,7 @@ use super::{
     pick_current, plan_reapply, pointer_policy, reapply_targets, stable_id,
 };
 use crate::hardware::WheelModeChange;
+use crate::runtime::ButtonInvalidation;
 use crate::watchers::pointer::{PointerPolicy, PointerScope};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding, ButtonId};
@@ -97,10 +98,13 @@ fn pointer_discovery_round_trip_rejects_old_samples_and_restarts_unavailable() {
         app: None,
         target: PointerTarget::Desktop,
     };
-    assert!(orch.set_pointer_observation(Observation {
-        demand: initial,
-        context: context.clone()
-    }));
+    assert_eq!(
+        orch.set_pointer_observation(Observation {
+            demand: initial,
+            context: context.clone()
+        }),
+        ButtonInvalidation::PointerExcept(PointerTarget::Desktop)
+    );
     let mut config = orch.config.clone();
     config.app_settings.mouse_profile_target = MouseProfileTarget::Focused;
     orch.reload_config(config.clone());
@@ -110,20 +114,26 @@ fn pointer_discovery_round_trip_rejects_old_samples_and_restarts_unavailable() {
         orch.mouse_context().1,
         PointerScope::Sampled(PointerTarget::Unavailable)
     );
-    assert!(!orch.set_pointer_observation(Observation {
-        demand: initial,
-        context: context.clone()
-    }));
+    assert_eq!(
+        orch.set_pointer_observation(Observation {
+            demand: initial,
+            context: context.clone()
+        }),
+        ButtonInvalidation::None
+    );
     assert_eq!(
         orch.mouse_context().1,
         PointerScope::Sampled(PointerTarget::Unavailable)
     );
     let fresh = *orch.shared.pointer_discovery.borrow();
     assert_ne!(fresh, initial);
-    assert!(orch.set_pointer_observation(Observation {
-        demand: fresh,
-        context
-    }));
+    assert_eq!(
+        orch.set_pointer_observation(Observation {
+            demand: fresh,
+            context
+        }),
+        ButtonInvalidation::PointerExcept(PointerTarget::Desktop)
+    );
     assert_eq!(
         orch.mouse_context().1,
         PointerScope::Sampled(PointerTarget::Desktop)
@@ -212,13 +222,16 @@ fn on_demand_bindings_ignore_samples_and_policy_changes_restart_discovery() {
     assert_eq!(orch.mouse_context(), (None, PointerScope::OnDemand));
     let plans = orch.shared.capture_plans.borrow().clone();
     // A late sample changes neither the published bindings nor any press.
-    assert!(!orch.set_pointer_observation(Observation {
-        demand: initial,
-        context: PointerContext {
-            app: Some(ForegroundApp::unnamed("browser".into())),
-            target: PointerTarget::Desktop,
-        },
-    }));
+    assert_eq!(
+        orch.set_pointer_observation(Observation {
+            demand: initial,
+            context: PointerContext {
+                app: Some(ForegroundApp::unnamed("browser".into())),
+                target: PointerTarget::Desktop,
+            },
+        }),
+        ButtonInvalidation::None
+    );
     assert_eq!(*orch.shared.capture_plans.borrow(), plans);
     assert_eq!(
         orch.shared.hook_maps.read().expect("maps").pointer_scope,

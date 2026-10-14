@@ -206,8 +206,11 @@ fn process_command(
                 emit,
             );
         }
-        ButtonCommand::CancelHooks => {
-            emit_canceled(state.cancel_hooks(), CancelReason::SourceEnded, emit);
+        ButtonCommand::CancelHooks(reason) => {
+            emit_canceled(state.cancel_hooks(), reason, emit);
+        }
+        ButtonCommand::CancelFocused => {
+            emit_canceled(state.cancel_focused(), CancelReason::Invalidated, emit);
         }
         ButtonCommand::CancelPointerExcept(current) => {
             emit_canceled(
