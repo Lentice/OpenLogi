@@ -10,7 +10,6 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use futures::stream::{self, Stream};
 
-use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
@@ -24,6 +23,7 @@ use openlogi_hook::Hook;
 use tokio::sync::Mutex;
 use tracing::warn;
 
+use crate::action_ring::ActionRing;
 use crate::server::AgentServer;
 use crate::{pairing, server};
 
@@ -35,7 +35,6 @@ pub(crate) struct Core {
     pub(crate) observable: Arc<ObservableState>,
     pub(crate) event_monitor: Arc<EventMonitor>,
     pub(crate) inputs: InputServices,
-    pub(crate) ring_haptics: server::RingHapticPlayer,
     /// Client declarations forwarded by the IPC server — the dormancy gate's
     /// demand channel. It buffers, so a declaration that lands before the
     /// gate listens is not lost.
@@ -71,7 +70,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         Arc::clone(&observable),
     ));
 
-    let (ring_haptics, demand) = spawn_ipc_server(
+    let demand = spawn_ipc_server(
         Arc::clone(&orchestrator),
         &shared,
         Arc::clone(&observable),
@@ -85,7 +84,6 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         observable,
         event_monitor,
         inputs,
-        ring_haptics,
         demand,
     })
 }
@@ -97,28 +95,24 @@ fn spawn_ipc_server(
     pairing: Arc<pairing::PairingManager>,
     event_monitor: Arc<EventMonitor>,
     inputs: &InputServices,
-) -> (
-    server::RingHapticPlayer,
-    tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
-) {
+) -> tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind> {
     let (server, demand) = AgentServer::new(
         orchestrator,
         shared.clone(),
         observable,
         pairing,
         event_monitor,
-        Arc::clone(&inputs.ring),
+        inputs.ring.clone(),
         inputs.dispatcher.clone(),
     );
-    let ring_haptics = server.ring_haptics.clone();
     tokio::spawn(server::run(server));
-    (ring_haptics, demand)
+    demand
 }
 
 /// The input-action runtimes — pure in-process workers that touch no device
 /// until an action is dispatched, so [`bootstrap`] may start them.
 pub(crate) struct InputServices {
-    pub(crate) ring: Arc<ActionRingManager>,
+    pub(crate) ring: ActionRing,
     pub(crate) triggers: tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
     pub(crate) dispatcher: ActionDispatcher,
     action_runtime: ActionRuntime,
@@ -128,7 +122,6 @@ pub(crate) struct InputServices {
 
 impl InputServices {
     fn start(shared: &SharedHandles) -> Option<Self> {
-        let ring = Arc::new(ActionRingManager::default());
         let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
         let action_runtime =
             match ActionRuntime::new(shared.dpi_cycle.clone(), shared.device_access(), sender) {
@@ -146,6 +139,7 @@ impl InputServices {
             }
         };
         let dispatcher = action_runtime.dispatcher();
+        let ring = ActionRing::spawn(dispatcher.clone(), shared.clone());
         let scroll_input = scroll_runtime.input();
         Some(Self {
             ring,

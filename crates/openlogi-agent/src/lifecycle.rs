@@ -44,7 +44,7 @@ use openlogi_ipc::ClientKind;
 use self::transition::{Drained, Replacement, ReplacementOutcome, WatcherFleet};
 use crate::shutdown::{self, ShutdownRequest, ShutdownRequests, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
-use crate::{autostart, overlay, server};
+use crate::{autostart, overlay};
 
 /// How long a dormant agent waits before leaving — generous next to the
 /// seconds a kickstarting GUI needs, and the window costs only an idle
@@ -233,7 +233,6 @@ impl Wanted {
             observable,
             event_monitor,
             inputs,
-            ring_haptics,
             demand,
         } = core;
         // Closing the channel turns post-arming declarations into no-ops in
@@ -247,7 +246,6 @@ impl Wanted {
                 observable,
                 event_monitor,
                 inputs,
-                ring_haptics,
                 signals,
                 shutdown_requests,
                 hidpp_watchers,
@@ -273,7 +271,6 @@ struct Running {
     observable: Arc<ObservableState>,
     event_monitor: Arc<EventMonitor>,
     inputs: InputServices,
-    ring_haptics: server::RingHapticPlayer,
     signals: ShutdownSignals,
     shutdown_requests: ShutdownRequests,
     hidpp_watchers: WatcherFleet,
@@ -452,20 +449,15 @@ impl Running {
     }
 
     async fn begin_action_ring(&self, device_key: Option<&str>) {
-        // A second trigger press while the ring is showing closes it.
-        if self.inputs.ring.dismiss_active() {
+        let Some(opening) = self.inputs.ring.press_trigger() else {
             return;
-        }
-        if let Some(session) = self
-            .orchestrator
-            .lock()
-            .await
-            .action_ring_session(device_key)
-        {
-            // Re-arm the firmware haptic engine first: power transitions can
-            // clear it, after which plays are accepted without feedback.
-            self.ring_haptics.arm(session.haptic_route.clone());
-            self.inputs.ring.begin(session);
+        };
+        // The orchestrator stays locked until the session is open, so a
+        // config reload cannot land between the snapshot and the session and
+        // miss dismissing a ring its new config disables.
+        let orchestrator = self.orchestrator.lock().await;
+        if let Some(session) = orchestrator.action_ring_session(device_key) {
+            opening.open(session);
         }
     }
 

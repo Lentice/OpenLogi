@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::{Action, ActionRingIcon, ActionRingLayout, ActionRingSlot};
@@ -17,6 +17,9 @@ use openlogi_ipc::{
     RingObservation,
 };
 use tokio::sync::watch;
+// Tokio's clock, not std's: identical in production, and it lets a paused
+// test runtime age a session past its lifetime without sleeping.
+use tokio::time::Instant;
 
 /// Slack between the window closing and the session expiring.
 ///

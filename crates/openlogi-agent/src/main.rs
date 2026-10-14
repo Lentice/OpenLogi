@@ -15,6 +15,7 @@
     windows_subsystem = "windows"
 )]
 
+mod action_ring;
 #[cfg(target_os = "macos")]
 mod activity_macos;
 mod autostart;
